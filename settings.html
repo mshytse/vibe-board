@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard Settings</title>
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <span class="page-title">Settings</span>
+      <a href="/" class="back-link">&#8592; Back to dashboard</a>
+    </header>
+
+    <main class="settings-wrap">
+
+      <section class="settings-section">
+        <h2>Jira Connection</h2>
+        <div class="form-row">
+          <label>Jira URL</label>
+          <input type="url" id="jiraUrl" placeholder="https://yourcompany.atlassian.net" />
+        </div>
+        <div class="form-row">
+          <label>Email</label>
+          <input type="email" id="email" placeholder="you@company.com" />
+        </div>
+        <div class="form-row">
+          <label>API Token</label>
+          <input type="password" id="token" placeholder="Paste new token, or leave as-is" autocomplete="new-password" />
+          <a href="https://id.atlassian.com/manage-api-tokens" target="_blank" class="field-hint">Get API token ↗</a>
+        </div>
+        <div class="form-row">
+          <label>Project Keys (comma-separated)</label>
+          <input type="text" id="projectKeys" placeholder="SCALRCORE, CLOUD" style="width:260px" />
+        </div>
+        <div class="form-actions">
+          <button id="testBtn" class="btn-secondary">Test connection</button>
+          <span id="testResult" class="inline-result"></span>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2>Team Members</h2>
+        <div class="search-wrap">
+          <input type="text" id="userSearch" placeholder="Search by name or email…" class="search-input" />
+          <div id="searchResults" class="search-results hidden"></div>
+        </div>
+        <div id="teamList" class="team-list"></div>
+      </section>
+
+      <div class="save-bar">
+        <button id="saveBtn" class="btn-primary">Save</button>
+        <span id="saveResult" class="inline-result"></span>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="api.js"></script>
+  <script src="settings.js"></script>
+</body>
+</html>
