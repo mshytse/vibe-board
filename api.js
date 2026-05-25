@@ -1,6 +1,6 @@
 class JiraAPI {
   async _get(path, params = {}) {
-    const u = new URL(`http://localhost:3000/api/jira/rest/api/3${path}`);
+    const u = new URL(`/api/jira/rest/api/3${path}`, location.origin);
     for (const [k, v] of Object.entries(params)) {
       if (v != null && v !== '') u.searchParams.set(k, String(v));
     }
