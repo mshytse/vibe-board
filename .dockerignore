@@ -1,0 +1,4 @@
+config.json
+.claude/
+.git/
+*.log

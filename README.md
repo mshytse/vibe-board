@@ -20,6 +20,26 @@ Internal Jira activity feed and support board.
    - **Project Keys** — comma-separated keys for the projects you want to track
    - **Team Members** — search and add the people you want to monitor
 
+## Docker (optional — for self-hosting on a server)
+
+Build and push to Docker Hub:
+```
+docker build -t your-dockerhub-username/team-dashboard .
+docker push your-dockerhub-username/team-dashboard
+```
+
+Run with a named volume so credentials survive restarts:
+```
+docker run -d \
+  --name team-dashboard \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -v team-dashboard-data:/data \
+  your-dockerhub-username/team-dashboard
+```
+
+Then open `http://<server-ip>:3000/settings.html` to configure credentials.
+
 ## Notes
 
 - Your credentials are stored locally in `config.json` (gitignored — never committed).

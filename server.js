@@ -5,7 +5,8 @@ const path = require('path');
 const url = require('url');
 
 const PORT = 3000;
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+const HOST = process.env.HOST || '127.0.0.1';
+const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, 'config.json');
 const agent = new https.Agent({ keepAlive: true, maxSockets: 30 });
 
 const MIME = {
@@ -127,7 +128,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, HOST, () => {
   console.log(`Team dashboard running at http://localhost:${PORT}`);
   console.log(`Settings page: http://localhost:${PORT}/settings.html`);
 });

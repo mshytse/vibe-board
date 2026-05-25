@@ -39,6 +39,7 @@ const BADGE_LABELS = {
 const api = new JiraAPI();
 let settings = null;
 let currentPeriod = 3;
+let lastUpdateTime = null;
 const columnFilters = {};
 const dataCache = {};
 
@@ -119,19 +120,25 @@ async function init() {
     });
   });
 
-  document.getElementById('renderBtn').addEventListener('click', () => {
-    const cached = dataCache[currentPeriod];
-    if (!cached) return;
-    const btn = document.getElementById('renderBtn');
-    btn.style.color = 'var(--accent-ink)';
-    setTimeout(() => btn.style.color = '', 400);
-    renderDashboard(cached);
-  });
-
-  document.getElementById('refreshBtn').addEventListener('click', () => {
+document.getElementById('refreshBtn').addEventListener('click', () => {
     const btn = document.getElementById('refreshBtn');
     btn.classList.add('spin');
     loadDashboard(true).finally(() => btn.classList.remove('spin'));
+  });
+
+  document.getElementById('searchInput').addEventListener('input', e => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll('#dashboard .card').forEach(card => {
+      if (!q) { card.style.display = ''; return; }
+      const name = card.querySelector('.who-name')?.textContent.toLowerCase() || '';
+      if (name.includes(q)) { card.style.display = ''; return; }
+      const hasRow = [...card.querySelectorAll('.row')].some(r => {
+        const key     = r.querySelector('.key')?.textContent.toLowerCase() || '';
+        const summary = r.querySelector('.summary')?.textContent.toLowerCase() || '';
+        return key.includes(q) || summary.includes(q);
+      });
+      card.style.display = hasRow ? '' : 'none';
+    });
   });
 
   document.addEventListener('keydown', e => {
@@ -140,6 +147,12 @@ async function init() {
       document.getElementById('searchInput')?.focus();
     }
   });
+
+  setInterval(() => {
+    if (!lastUpdateTime) return;
+    const lu = document.getElementById('lastUpdated');
+    if (lu) lu.textContent = timeRel(lastUpdateTime);
+  }, 30000);
 
   loadDashboard();
 }
@@ -178,6 +191,7 @@ async function loadDashboard(forceRefresh = false) {
     }
   }
 
+  lastUpdateTime = new Date();
   const lu = document.getElementById('lastUpdated');
   if (lu) lu.textContent = 'just now';
   dataCache[currentPeriod] = newCache;

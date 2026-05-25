@@ -229,14 +229,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .meta { color: var(--text-3); font-size: 12px; white-space: nowrap; }
 .meta b { color: var(--text-2); font-weight: 500; }
 .meta-dot { display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: var(--text-4); margin: 0 6px; vertical-align: 2px; }
-.live-dot {
-  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-  background: oklch(0.65 0.18 145);
-  box-shadow: 0 0 0 3px color-mix(in oklch, oklch(0.65 0.18 145) 25%, transparent);
-  margin-right: 6px;
-  animation: pulse 1.8s ease-in-out infinite;
-}
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
 
 .icon-btn {
   width: 32px; height: 32px;
