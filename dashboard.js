@@ -43,6 +43,7 @@ let supportTickets = [];
 let supportTotal = 0;
 let supportInternalFieldId = null;
 let supportFolded = false;
+let supportCache = null;
 const columnFilters = {};
 const dataCache = {};
 
@@ -157,7 +158,7 @@ async function init() {
     const btn = document.getElementById('refreshBtn');
     btn.classList.add('spin');
     if (currentView === 'support') {
-      loadSupportBoard().finally(() => btn.classList.remove('spin'));
+      loadSupportBoard(true).finally(() => btn.classList.remove('spin'));
     } else {
       loadDashboard(true).finally(() => btn.classList.remove('spin'));
     }
@@ -891,19 +892,44 @@ function switchView(view) {
   if (view === 'support') loadSupportBoard(); else loadDashboard();
 }
 
-async function loadSupportBoard() {
+function syncSupportCache() {
+  supportCache = {
+    tickets: supportTickets,
+    total: supportTotal,
+    internalFieldId: supportInternalFieldId,
+  };
+}
+
+function restoreSupportFromCache() {
+  supportTickets = supportCache.tickets;
+  supportTotal = supportCache.total;
+  supportInternalFieldId = supportCache.internalFieldId;
+}
+
+async function loadSupportBoard(forceRefresh = false) {
+  const board = document.getElementById('support-board');
+
+  if (!forceRefresh && supportCache) {
+    restoreSupportFromCache();
+    if (supportTickets.length === 0 && supportTotal === 0) {
+      board.innerHTML = '<div class="sb-empty">No open support items.</div>';
+      return;
+    }
+    renderSupportBoardUI(board);
+    return;
+  }
+
   supportTickets = [];
   supportTotal = 0;
   supportInternalFieldId = null;
-  const board = document.getElementById('support-board');
   board.innerHTML = '<div class="sb-empty">Loading…</div>';
   try {
     const data = await fetchSupportData(0);
     if (currentView !== 'support') return;
     supportInternalFieldId = data.internalFieldId;
     supportTotal = data.total;
-    const newTickets = data.issues.map(i => normalizeTicket(i, data.internalFieldId));
-    supportTickets = newTickets;
+    supportTickets = data.issues.map(i => normalizeTicket(i, data.internalFieldId));
+    syncSupportCache();
     if (supportTickets.length === 0 && supportTotal === 0) {
       board.innerHTML = '<div class="sb-empty">No open support items.</div>';
       return;
@@ -1193,6 +1219,7 @@ function renderSupportBoardUI(board) {
         const newTickets = data.issues.map(i => normalizeTicket(i, supportInternalFieldId));
         supportTickets = [...supportTickets, ...newTickets];
         supportTotal = data.total;
+        syncSupportCache();
         renderSupportBoardUI(board);
       } catch (err) {
         btn.disabled = false;
