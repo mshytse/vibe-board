@@ -817,11 +817,11 @@ function renderPRItem(pr) {
 
   item.innerHTML = `
     <div class="row-top">
-      <a class="row-sum" href="${escHtml(pr.url)}" target="_blank" rel="noopener">${escHtml(trunc(pr.title, 100))}</a>
+      <span class="pr-repo">${escHtml(pr.repo)}</span>
       <span class="row-time" title="${escHtml(timeAbs(pr.createdAt))}">${timeRel(pr.createdAt)}</span>
     </div>
+    <a class="row-title" href="${escHtml(pr.url)}" target="_blank" rel="noopener">${escHtml(trunc(pr.title, 120))}</a>
     <div class="row-meta">
-      <span class="pr-repo">${escHtml(pr.repo)}</span>
       ${branchHtml}
       <span class="mpill ${stateClass}">${stateLabel}</span>
       ${authorshipHtml}
@@ -896,9 +896,9 @@ function renderFeedItem(act) {
   const titleLine = `
     <div class="row-top">
       ${keyHtml}
-      <a class="row-sum" href="${url}" target="_blank" rel="noopener">${escHtml(trunc(act.issue.summary, 100))}</a>
       <span class="row-time" title="${escHtml(timeAbs(act.timestamp))}">${timeRel(act.timestamp)}</span>
-    </div>`;
+    </div>
+    <a class="row-title" href="${url}" target="_blank" rel="noopener">${escHtml(trunc(act.issue.summary, 120))}</a>`;
 
   // Comments and mentions → styled block like support board
   if (act.type === 'comment' || act.type === 'mention') {
