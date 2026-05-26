@@ -841,9 +841,17 @@ function renderOrphanGroup(group) {
       <span class="row-time">${timeRel(c.date)}</span>
     </div>`).join('');
 
+  const branchHtml = group.branch
+    ? `<span class="pr-branch"><svg viewBox="0 0 16 16" fill="currentColor" width="10" height="10" aria-hidden="true"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>${escHtml(group.branch)}</span>`
+    : '';
+
   el.innerHTML = `
-    <div class="row-meta" style="margin-bottom:6px">
+    <div class="row-top">
       <span class="pr-repo">${escHtml(group.repo)}</span>
+      <span class="row-time" title="${escHtml(timeAbs(group.commits[0].date))}">${timeRel(group.commits[0].date)}</span>
+    </div>
+    <div class="row-meta" style="margin-bottom:6px">
+      ${branchHtml}
       <span class="mpill mpill--from">No PR</span>
       <span class="orphan-count">${group.commits.length} commit${group.commits.length !== 1 ? 's' : ''}</span>
     </div>
@@ -1155,30 +1163,64 @@ async function fetchGithubPRs(member, days) {
     } catch {}
   }));
 
-  // Orphan commits: unclaimed by any merged PR
-  // Skip repos where the user already has an open PR (commits are likely part of it)
-  const openAuthoredRepos = new Set(
-    [...prMap.values()].filter(p => p.isAuthor && p.state === 'open').map(p => p.repo)
-  );
+  // Find branches without any PR using push events.
+  // The commit search API only indexes commits on the default branch, so it misses
+  // feature branches that have never been merged. Push events capture all branch pushes.
+  const orphanCommits = [];
+  if (member.githubUsername) {
+    try {
+      const eventsRes = await fetch(`/api/github/users/${encodeURIComponent(member.githubUsername)}/events?per_page=100`);
+      if (eventsRes.ok) {
+        const events = await eventsRes.json();
+        const pushBranches = new Map();
 
-  const orphanByRepo = new Map();
-  for (const commit of commits) {
-    if (claimedShas.has(commit.sha)) continue;
-    const full     = commit.repository.full_name;
-    const repoName = full.split('/').pop();
-    if (openAuthoredRepos.has(repoName)) continue;
-    if (!orphanByRepo.has(full)) orphanByRepo.set(full, { repo: repoName, commits: [] });
-    orphanByRepo.get(full).commits.push({
-      sha:     commit.sha.slice(0, 7),
-      message: commit.commit.message.split('\n')[0],
-      url:     commit.html_url,
-      date:    new Date(commit.commit.author.date),
-    });
+        for (const event of events) {
+          if (event.type !== 'PushEvent') continue;
+          if (!event.repo?.name?.startsWith('scalr/')) continue;
+          if (new Date(event.created_at) < cutoff) continue;
+          const ref = event.payload?.ref || '';
+          if (!ref.startsWith('refs/heads/')) continue;
+
+          const branchName = ref.slice('refs/heads/'.length);
+          const repoName   = event.repo.name.split('/').pop();
+          const key        = `${repoName}/${branchName}`;
+          const eventDate  = new Date(event.created_at);
+
+          if (!pushBranches.has(key)) {
+            pushBranches.set(key, { repo: repoName, branch: branchName, commits: [], latestDate: eventDate, _shas: new Set() });
+          }
+          const entry = pushBranches.get(key);
+          if (eventDate > entry.latestDate) entry.latestDate = eventDate;
+
+          for (const c of (event.payload.commits || [])) {
+            if (entry._shas.has(c.sha)) continue;
+            entry._shas.add(c.sha);
+            entry.commits.push({
+              sha:     c.sha.slice(0, 7),
+              message: c.message.split('\n')[0],
+              url:     `https://github.com/${event.repo.name}/commit/${c.sha}`,
+              date:    eventDate,
+            });
+          }
+        }
+
+        // Branches that already have a PR (any state) are shown in the PRs section
+        const prBranchKeys = new Set(
+          [...prMap.values()].map(pr => pr.branch ? `${pr.repo}/${pr.branch}` : null).filter(Boolean)
+        );
+
+        for (const group of pushBranches.values()) {
+          if (prBranchKeys.has(`${group.repo}/${group.branch}`)) continue;
+          delete group._shas;
+          orphanCommits.push(group);
+        }
+      }
+    } catch {}
   }
 
   return {
     prs:           [...prMap.values()].sort((a, b) => b.createdAt - a.createdAt),
-    orphanCommits: [...orphanByRepo.values()],
+    orphanCommits: orphanCommits.sort((a, b) => b.latestDate - a.latestDate),
   };
 }
 
