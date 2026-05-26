@@ -42,6 +42,18 @@
       </section>
 
       <section class="settings-section">
+        <h2>GitHub Connection</h2>
+        <div class="form-row">
+          <label>Personal Access Token</label>
+          <input type="password" id="githubToken" placeholder="Paste new token, or leave as-is" autocomplete="new-password" />
+          <a href="https://github.com/settings/tokens/new?scopes=repo,read:org" target="_blank" class="field-hint">Create token ↗</a>
+        </div>
+        <div class="form-row" style="margin-top:4px">
+          <label style="color:var(--text-3,#6b778c);font-size:12px">Needs <code>repo</code> and <code>read:org</code> scopes to read Scalr repos.</label>
+        </div>
+      </section>
+
+      <section class="settings-section">
         <h2>Team Members</h2>
         <div class="search-wrap">
           <input type="text" id="userSearch" placeholder="Search by name or email…" class="search-input" />

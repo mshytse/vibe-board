@@ -31,6 +31,8 @@ const COLUMN_INITIAL_LIMIT = 8;
 const ACTIVITY_LABELS = {
   created:       { label: 'Created',  cls: 'tc-spill--created' },
   self_assigned: { label: 'Assigned', cls: 'tc-spill--assigned' },
+  status_change: { label: 'Moved',    cls: 'tc-spill--progress' },
+  closed:        { label: 'Closed',   cls: 'tc-spill--default' },
 };
 
 const api = new JiraAPI();
@@ -190,15 +192,19 @@ async function loadDashboard(forceRefresh = false) {
     skeletons.set(member.accountId, sk);
   }
 
-  const newCache = { activities: {}, currentAssignments: {}, staleByUser: {} };
+  const newCache = { activities: {}, currentAssignments: {}, staleByUser: {}, githubPRs: {} };
   for (const [idx, member] of settings.teamMembers.entries()) {
     try {
-      const data = await fetchUserData(member, currentPeriod);
+      const [data, ghData] = await Promise.all([
+        fetchUserData(member, currentPeriod),
+        fetchGithubPRs(member, currentPeriod),
+      ]);
       if (currentView !== 'team') return;
       newCache.activities[member.accountId]         = data.activities;
       newCache.currentAssignments[member.accountId] = data.currentAssignment;
       newCache.staleByUser[member.accountId]        = data.stale;
-      const card = renderUserCard(member, data.activities, data.currentAssignment, data.stale, idx);
+      newCache.githubPRs[member.accountId]          = ghData;
+      const card = renderUserCard(member, data.activities, data.currentAssignment, data.stale, ghData, idx);
       card.style.cssText = 'opacity:0;transform:translateY(4px);transition:opacity .22s ease,transform .22s ease';
       skeletons.get(member.accountId).replaceWith(card);
       requestAnimationFrame(() => { card.style.opacity = '1'; card.style.transform = 'none'; });
@@ -379,15 +385,42 @@ async function refreshColumn(member, _colDef, colEl, card) {
   if (rowsEl) rowsEl.innerHTML = '<div class="empty">Refreshing…</div>';
 
   try {
-    const userData = await fetchUserData(member, currentPeriod);
+    const [userData, ghData] = await Promise.all([
+      fetchUserData(member, currentPeriod),
+      fetchGithubPRs(member, currentPeriod),
+    ]);
     if (dataCache[currentPeriod]) {
       dataCache[currentPeriod].activities[member.accountId]         = userData.activities;
       dataCache[currentPeriod].currentAssignments[member.accountId] = userData.currentAssignment;
       dataCache[currentPeriod].staleByUser[member.accountId]        = userData.stale;
+      dataCache[currentPeriod].githubPRs = dataCache[currentPeriod].githubPRs || {};
+      dataCache[currentPeriod].githubPRs[member.accountId]          = ghData;
     }
     const memberIdx = settings.teamMembers.indexOf(member);
-    const newCard = renderUserCard(member, userData.activities, userData.currentAssignment, userData.stale, memberIdx);
+    const newCard = renderUserCard(member, userData.activities, userData.currentAssignment, userData.stale, ghData, memberIdx);
     card.replaceWith(newCard);
+  } catch (err) {
+    btn.disabled = false;
+    btn.classList.remove('spin');
+    if (rowsEl) rowsEl.innerHTML = `<div class="empty" style="color:var(--b-mention-fg)">Error: ${escHtml(err.message)}</div>`;
+  }
+}
+
+async function refreshCodeColumn(member, colEl) {
+  const rowsEl = colEl.querySelector('.rows');
+  const btn    = colEl.querySelector('.col-actions button');
+  btn.disabled = true;
+  btn.classList.add('spin');
+  if (rowsEl) rowsEl.innerHTML = '<div class="empty">Refreshing…</div>';
+
+  try {
+    const ghData = await fetchGithubPRs(member, currentPeriod);
+    if (dataCache[currentPeriod]) {
+      dataCache[currentPeriod].githubPRs = dataCache[currentPeriod].githubPRs || {};
+      dataCache[currentPeriod].githubPRs[member.accountId] = ghData;
+    }
+    const newCol = renderCodeColumn(member, ghData);
+    colEl.replaceWith(newCol);
   } catch (err) {
     btn.disabled = false;
     btn.classList.remove('spin');
@@ -444,7 +477,7 @@ function adfMentions(node) {
 
 // ── Render ─────────────────────────────────────────────────────────────────
 
-function renderDashboard({ activities, currentAssignments, staleByUser }) {
+function renderDashboard({ activities, currentAssignments, staleByUser, githubPRs = {} }) {
   const container = document.getElementById('dashboard');
   container.innerHTML = '';
   for (const [idx, member] of settings.teamMembers.entries()) {
@@ -453,12 +486,13 @@ function renderDashboard({ activities, currentAssignments, staleByUser }) {
       activities[member.accountId] || [],
       currentAssignments[member.accountId],
       staleByUser[member.accountId] || [],
+      githubPRs[member.accountId] || { prs: [], orphanCommits: [] },
       idx
     ));
   }
 }
 
-function renderUserCard(member, activities, assignment, stale, memberIdx = 0) {
+function renderUserCard(member, activities, assignment, stale, ghData = { prs: [], orphanCommits: [] }, memberIdx = 0) {
   const card = document.createElement('article');
   card.className = 'card';
   card.dataset.memberId = member.accountId;
@@ -519,9 +553,12 @@ function renderUserCard(member, activities, assignment, stale, memberIdx = 0) {
 
   // Activity columns
   const columnsEl = document.createElement('div');
-  columnsEl.className = 'columns';
+  columnsEl.className = settings.githubToken ? 'columns has-code' : 'columns';
   for (const col of COLUMNS) {
     columnsEl.appendChild(renderColumn(col, member, activities.filter(a => col.types.has(a.type)), card));
+  }
+  if (settings.githubToken) {
+    columnsEl.appendChild(renderCodeColumn(member, ghData));
   }
   card.appendChild(columnsEl);
 
@@ -639,6 +676,180 @@ function renderColumn(colDef, member, activities, card) {
   }
 
   return col;
+}
+
+function renderCodeColumn(member, { prs, orphanCommits }) {
+  if (!columnFilters[member.accountId]) columnFilters[member.accountId] = {};
+  if (!columnFilters[member.accountId]['code']) columnFilters[member.accountId]['code'] = 'all';
+  const activeTab = columnFilters[member.accountId]['code'];
+
+  const canSplit = prs.some(p => p.isAuthor !== null);
+  const myPRs    = canSplit ? prs.filter(p => p.isAuthor)  : prs;
+  const contrib  = canSplit ? prs.filter(p => !p.isAuthor) : [];
+  const total    = prs.length + orphanCommits.reduce((n, g) => n + g.commits.length, 0);
+
+  const filters = [
+    { type: 'all',         label: 'All' },
+    { type: 'pr',          label: 'PRs',            n: myPRs.length },
+    { type: 'contributed', label: 'Contributed to', n: contrib.length },
+    { type: 'branch',      label: 'Branches',       n: orphanCommits.length },
+  ];
+
+  const tabsHtml = filters.map(f => {
+    const badge = f.n != null ? `<span class="n">${f.n}</span>` : '';
+    return `<button data-tab="${f.type}" aria-pressed="${activeTab === f.type}">${escHtml(f.label)}${badge}</button>`;
+  }).join('');
+
+  const ghHref = member.githubUsername
+    ? `https://github.com/${member.githubUsername}`
+    : 'https://github.com/scalr';
+
+  const col = document.createElement('section');
+  col.className = 'col';
+  col.dataset.col = 'code';
+
+  col.innerHTML = `
+    <div class="col-head">
+      <span class="col-title">Code</span>
+      <span class="col-count">${total}</span>
+      <div class="col-actions">
+        <a href="${escHtml(ghHref)}" target="_blank" rel="noopener" class="icon-btn" title="Open GitHub" aria-label="Open GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" width="14" height="14"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0 0 22 12.017C22 6.484 17.522 2 12 2Z"/></svg>
+        </a>
+        <button class="icon-btn" title="Refresh Code" aria-label="Refresh Code">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="tabs">${tabsHtml}</div>
+    <div class="rows"></div>`;
+
+  col.querySelectorAll('.tabs button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      columnFilters[member.accountId]['code'] = btn.dataset.tab;
+      applyCodeColumnFilter(col, btn.dataset.tab);
+    });
+  });
+
+  col.querySelector('.col-actions button').addEventListener('click', () => refreshCodeColumn(member, col));
+
+  const rowsEl = col.querySelector('.rows');
+
+  if (total === 0) {
+    const hint = member.githubUsername ? '' : ' — set a GitHub username in Settings';
+    rowsEl.innerHTML = `<div class="empty">
+      <div class="empty-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
+      </div>
+      No activity in this window${escHtml(hint)}
+    </div>`;
+    return col;
+  }
+
+  for (const pr of myPRs) {
+    const item = renderPRItem(pr);
+    item.dataset.type = 'pr';
+    rowsEl.appendChild(item);
+  }
+
+  for (const pr of contrib) {
+    const item = renderPRItem(pr);
+    item.dataset.type = 'contributed';
+    rowsEl.appendChild(item);
+  }
+
+  for (const group of orphanCommits) {
+    const item = renderOrphanGroup(group);
+    item.dataset.type = 'branch';
+    rowsEl.appendChild(item);
+  }
+
+  const showBtn = document.createElement('button');
+  showBtn.className = 'show-more-btn';
+  showBtn.addEventListener('click', () => applyCodeColumnFilter(col, columnFilters[member.accountId]['code'], true));
+  rowsEl.appendChild(showBtn);
+
+  applyCodeColumnFilter(col, activeTab);
+  return col;
+}
+
+function applyCodeColumnFilter(colEl, type, revealAll = false) {
+  colEl.querySelectorAll('.tabs button').forEach(btn =>
+    btn.setAttribute('aria-pressed', btn.dataset.tab === type ? 'true' : 'false')
+  );
+
+  const rows     = [...colEl.querySelectorAll('.row')];
+  const matching = rows.filter(r => type === 'all' || r.dataset.type === type);
+
+  rows.forEach(r => {
+    r.classList.remove('row-extra');
+    r.style.display = (type === 'all' || r.dataset.type === type) ? '' : 'none';
+  });
+
+  const hidden = revealAll ? [] : matching.slice(COLUMN_INITIAL_LIMIT);
+  hidden.forEach(r => r.classList.add('row-extra'));
+
+  const showBtn = colEl.querySelector('.show-more-btn');
+  if (showBtn) {
+    showBtn.style.display = hidden.length === 0 ? 'none' : '';
+    if (hidden.length > 0) showBtn.textContent = `Show ${hidden.length} more`;
+  }
+}
+
+function renderPRItem(pr) {
+  const item = document.createElement('div');
+  const authorshipCls = pr.isAuthor === true ? 'pr-row--authored' : pr.isAuthor === false ? 'pr-row--contrib' : '';
+  item.className = ['row', 'pr-row', authorshipCls].filter(Boolean).join(' ');
+  item.dataset.state = pr.state;
+
+  const stateClass = pr.state === 'merged' ? 'mpill--merged' : pr.state === 'open' ? 'mpill--to' : 'mpill--from';
+  const stateLabel = pr.state === 'merged' ? 'Merged' : pr.state === 'open' ? 'Open' : 'Closed';
+
+  const branchHtml = pr.branch
+    ? `<span class="pr-branch"><svg viewBox="0 0 16 16" fill="currentColor" width="10" height="10" aria-hidden="true"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>${escHtml(pr.branch)}</span>`
+    : '';
+
+  const authorshipHtml = pr.isAuthor === true
+    ? `<span class="mpill mpill--authored">Authored</span>`
+    : pr.isAuthor === false
+      ? `<span class="mpill mpill--contrib">Contributed</span>`
+      : '';
+
+  item.innerHTML = `
+    <div class="row-top">
+      <a class="row-sum" href="${escHtml(pr.url)}" target="_blank" rel="noopener">${escHtml(trunc(pr.title, 100))}</a>
+      <span class="row-time" title="${escHtml(timeAbs(pr.createdAt))}">${timeRel(pr.createdAt)}</span>
+    </div>
+    <div class="row-meta">
+      <span class="pr-repo">${escHtml(pr.repo)}</span>
+      ${branchHtml}
+      <span class="mpill ${stateClass}">${stateLabel}</span>
+      ${authorshipHtml}
+    </div>`;
+
+  return item;
+}
+
+function renderOrphanGroup(group) {
+  const el = document.createElement('div');
+  el.className = 'row orphan-group';
+
+  const commitsHtml = group.commits.map(c => `
+    <div class="orphan-commit">
+      <a class="orphan-sha" href="${escHtml(c.url)}" target="_blank" rel="noopener">${escHtml(c.sha)}</a>
+      <a class="orphan-msg" href="${escHtml(c.url)}" target="_blank" rel="noopener">${escHtml(trunc(c.message, 80))}</a>
+      <span class="row-time">${timeRel(c.date)}</span>
+    </div>`).join('');
+
+  el.innerHTML = `
+    <div class="row-meta" style="margin-bottom:6px">
+      <span class="pr-repo">${escHtml(group.repo)}</span>
+      <span class="mpill mpill--from">No PR</span>
+      <span class="orphan-count">${group.commits.length} commit${group.commits.length !== 1 ? 's' : ''}</span>
+    </div>
+    <div class="orphan-commits">${commitsHtml}</div>`;
+
+  return el;
 }
 
 function toggleColumnFilter(userId, colId, type, colEl) {
@@ -841,6 +1052,134 @@ function toJiraDate(date) {
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   return `"${y}-${m}-${d}"`;
+}
+
+function isoDate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+async function fetchGithubPRs(member, days) {
+  const empty = { prs: [], orphanCommits: [] };
+  if (!settings.githubToken) return empty;
+
+  const cutoff  = workingDaysCutoff(days);
+  const dateStr = isoDate(cutoff);
+  const ghUser  = (member.githubUsername || '').toLowerCase();
+  const authorQ = member.githubUsername
+    ? `author:${member.githubUsername}`
+    : `author-email:${member.email}`;
+
+  // Run both searches in parallel:
+  // - GraphQL for authored PRs: two aliased searches in one request —
+  //   "open" catches all open PRs regardless of activity date,
+  //   "recent" catches closed/merged PRs updated within the window.
+  // - REST commit search for contributed (non-authored) PRs
+  const GQL_PR_FIELDS = `number title url state mergedAt createdAt headRefName repository{name} author{login}`;
+  const GQL_AUTHORED  = `query($open:String!,$recent:String!){
+    open:   search(query:$open,   type:ISSUE, first:20){nodes{...on PullRequest{${GQL_PR_FIELDS}}}}
+    recent: search(query:$recent, type:ISSUE, first:20){nodes{...on PullRequest{${GQL_PR_FIELDS}}}}
+  }`;
+
+  const [commitsRes, authoredRes] = await Promise.all([
+    fetch(`/api/github/search/commits?q=${encodeURIComponent(`${authorQ} org:scalr committer-date:>=${dateStr}`)}&per_page=30&sort=committer-date&order=desc`),
+    member.githubUsername
+      ? fetch('/api/github/graphql', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: GQL_AUTHORED,
+            variables: {
+              open:   `is:open   type:pr org:scalr author:${member.githubUsername}`,
+              recent: `is:closed type:pr org:scalr author:${member.githubUsername} updated:>=${dateStr}`,
+            },
+          }),
+        })
+      : Promise.resolve(null),
+  ]);
+
+  const commitsData  = commitsRes.ok ? await commitsRes.json() : { items: [] };
+  const authoredData = authoredRes?.ok ? await authoredRes.json() : null;
+
+  const commits = (commitsData.items || []).slice(0, 25);
+  const authoredNodes = [
+    ...(authoredData?.data?.open?.nodes   || []),
+    ...(authoredData?.data?.recent?.nodes || []),
+  ];
+
+  const prMap       = new Map();
+  const claimedShas = new Set();
+
+  // Authored PRs from GraphQL — branch name already included, no extra calls needed
+  for (const pr of authoredNodes) {
+    prMap.set(pr.url, {
+      number:    pr.number,
+      title:     pr.title,
+      url:       pr.url,
+      repo:      pr.repository.name,
+      branch:    pr.headRefName || '',
+      state:     pr.mergedAt ? 'merged' : pr.state.toLowerCase(),
+      author:    pr.author?.login || '',
+      isAuthor:  true,
+      createdAt: new Date(pr.createdAt),
+    });
+  }
+
+  // Commit-based lookup for contributed (non-authored) PRs
+  // Note: GitHub only returns merged PRs via this endpoint — open contributed PRs are not detectable
+  await Promise.all(commits.map(async commit => {
+    const repoFull = commit.repository.full_name;
+    const sha      = commit.sha;
+    try {
+      const res = await fetch(`/api/github/repos/${repoFull}/commits/${sha}/pulls`);
+      if (!res.ok) return;
+      const prs = await res.json();
+      if (prs.length > 0) claimedShas.add(sha);
+      for (const pr of prs) {
+        if (prMap.has(pr.html_url)) continue;
+        const prAuthor = (pr.user?.login || '').toLowerCase();
+        prMap.set(pr.html_url, {
+          number:    pr.number,
+          title:     pr.title,
+          url:       pr.html_url,
+          repo:      repoFull.split('/').pop(),
+          branch:    pr.head?.ref || '',
+          state:     pr.merged_at ? 'merged' : pr.state,
+          author:    pr.user?.login || '',
+          isAuthor:  ghUser ? ghUser === prAuthor : null,
+          createdAt: new Date(pr.created_at),
+        });
+      }
+    } catch {}
+  }));
+
+  // Orphan commits: unclaimed by any merged PR
+  // Skip repos where the user already has an open PR (commits are likely part of it)
+  const openAuthoredRepos = new Set(
+    [...prMap.values()].filter(p => p.isAuthor && p.state === 'open').map(p => p.repo)
+  );
+
+  const orphanByRepo = new Map();
+  for (const commit of commits) {
+    if (claimedShas.has(commit.sha)) continue;
+    const full     = commit.repository.full_name;
+    const repoName = full.split('/').pop();
+    if (openAuthoredRepos.has(repoName)) continue;
+    if (!orphanByRepo.has(full)) orphanByRepo.set(full, { repo: repoName, commits: [] });
+    orphanByRepo.get(full).commits.push({
+      sha:     commit.sha.slice(0, 7),
+      message: commit.commit.message.split('\n')[0],
+      url:     commit.html_url,
+      date:    new Date(commit.commit.author.date),
+    });
+  }
+
+  return {
+    prs:           [...prMap.values()].sort((a, b) => b.createdAt - a.createdAt),
+    orphanCommits: [...orphanByRepo.values()],
+  };
 }
 
 function timeAbs(date) {

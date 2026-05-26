@@ -30,6 +30,55 @@ function saveConfig(data) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2));
 }
 
+function githubRequest(config, ghPath, cb) {
+  const reqUrl = url.parse(`https://api.github.com${ghPath}`);
+  const options = {
+    hostname: reqUrl.hostname,
+    port: 443,
+    path: reqUrl.path,
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${config.githubToken}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'jira-board-dashboard',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  };
+  const req = https.request({ ...options, agent }, res => {
+    let body = '';
+    res.on('data', chunk => { body += chunk; });
+    res.on('end', () => cb(null, res.statusCode, body));
+  });
+  req.on('error', err => cb(err));
+  req.end();
+}
+
+function githubGraphQL(config, body, cb) {
+  const bodyStr = JSON.stringify(body);
+  const options = {
+    hostname: 'api.github.com',
+    port: 443,
+    path: '/graphql',
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.githubToken}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr),
+      'User-Agent': 'jira-board-dashboard',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  };
+  const req = https.request({ ...options, agent }, res => {
+    let data = '';
+    res.on('data', chunk => { data += chunk; });
+    res.on('end', () => cb(null, res.statusCode, data));
+  });
+  req.on('error', err => cb(err));
+  req.write(bodyStr);
+  req.end();
+}
+
 function jiraRequest(config, jiraPath, cb) {
   const base = config.jiraUrl.replace(/\/$/, '');
   const reqUrl = url.parse(`${base}${jiraPath}`);
@@ -59,6 +108,57 @@ const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url, true);
   const pathname = parsed.pathname;
 
+  // ── API: GitHub GraphQL ──
+  if (pathname === '/api/github/graphql' && req.method === 'POST') {
+    const config = loadConfig();
+    if (!config.githubToken) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'GitHub not configured' }));
+      return;
+    }
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        return;
+      }
+      githubGraphQL(config, parsed, (err, status, data) => {
+        if (err) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+          return;
+        }
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(data);
+      });
+    });
+    return;
+  }
+
+  // ── API: proxy to GitHub ──
+  if (pathname.startsWith('/api/github/')) {
+    const config = loadConfig();
+    if (!config.githubToken) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'GitHub not configured' }));
+      return;
+    }
+    const ghPath = req.url.replace('/api/github', '');
+    githubRequest(config, ghPath, (err, status, body) => {
+      if (err) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+        return;
+      }
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(body);
+    });
+    return;
+  }
+
   // ── API: proxy to Jira ──
   if (pathname.startsWith('/api/jira/')) {
     const config = loadConfig();
@@ -85,7 +185,7 @@ const server = http.createServer((req, res) => {
   if (pathname === '/api/settings' && req.method === 'GET') {
     const config = loadConfig();
     // Never expose the token to the browser
-    const safe = { ...config, token: config.token ? '••••••••' : '' };
+    const safe = { ...config, token: config.token ? '••••••••' : '', githubToken: config.githubToken ? '••••••••' : '' };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(safe));
     return;
@@ -101,6 +201,7 @@ const server = http.createServer((req, res) => {
         const existing = loadConfig();
         // Keep old token if placeholder was sent (user didn't change it)
         if (incoming.token === '••••••••') incoming.token = existing.token || '';
+        if (incoming.githubToken === '••••••••') incoming.githubToken = existing.githubToken || '';
         saveConfig(incoming);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));

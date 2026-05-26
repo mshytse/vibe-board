@@ -8,7 +8,8 @@ async function init() {
   if (config.jiraUrl)    document.getElementById('jiraUrl').value    = config.jiraUrl;
   if (config.email)      document.getElementById('email').value      = config.email;
   if (config.token)      document.getElementById('token').value      = config.token;
-  if (config.projectKeys) document.getElementById('projectKeys').value = config.projectKeys;
+  if (config.projectKeys)  document.getElementById('projectKeys').value  = config.projectKeys;
+  if (config.githubToken)  document.getElementById('githubToken').value  = config.githubToken;
 
   teamMembers = config.teamMembers || [];
   renderTeamList();
@@ -41,7 +42,7 @@ async function testConnection() {
   await fetch('/api/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jiraUrl: url, email, token, projectKeys: document.getElementById('projectKeys').value.trim() || 'SCALRCORE, CLOUD', teamMembers }),
+    body: JSON.stringify({ jiraUrl: url, email, token, projectKeys: document.getElementById('projectKeys').value.trim() || 'SCALRCORE, CLOUD', githubToken: document.getElementById('githubToken').value.trim(), teamMembers }),
   });
 
   try {
@@ -131,10 +132,14 @@ function renderTeamList() {
         <span class="member-email">${escHtml(m.email)}</span>
       </div>
       <input class="member-label-input" type="text" value="${escHtml(m.label || '')}" placeholder="Role · Location" />
+      <input class="member-gh-input" type="text" value="${escHtml(m.githubUsername || '')}" placeholder="GitHub username" />
       <button class="remove-btn">Remove</button>
     `;
     item.querySelector('.member-label-input').addEventListener('input', e => {
       teamMembers[idx].label = e.target.value;
+    });
+    item.querySelector('.member-gh-input').addEventListener('input', e => {
+      teamMembers[idx].githubUsername = e.target.value;
     });
     item.querySelector('.remove-btn').addEventListener('click', () => removeMember(m.accountId));
     list.appendChild(item);
@@ -142,11 +147,12 @@ function renderTeamList() {
 }
 
 async function saveSettings() {
-  const jiraUrl    = document.getElementById('jiraUrl').value.trim();
-  const email      = document.getElementById('email').value.trim();
-  const token      = document.getElementById('token').value.trim();
+  const jiraUrl     = document.getElementById('jiraUrl').value.trim();
+  const email       = document.getElementById('email').value.trim();
+  const token       = document.getElementById('token').value.trim();
   const projectKeys = document.getElementById('projectKeys').value.trim() || 'SCALRCORE, CLOUD';
-  const result     = document.getElementById('saveResult');
+  const githubToken = document.getElementById('githubToken').value.trim();
+  const result      = document.getElementById('saveResult');
 
   if (!jiraUrl || !email) {
     setResult(result, 'error', 'Jira URL and email are required');
@@ -156,7 +162,7 @@ async function saveSettings() {
   const res = await fetch('/api/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jiraUrl, email, token, projectKeys, teamMembers }),
+    body: JSON.stringify({ jiraUrl, email, token, projectKeys, githubToken, teamMembers }),
   });
 
   if (res.ok) {
