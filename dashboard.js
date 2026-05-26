@@ -23,15 +23,13 @@ const COLUMNS = [
   },
 ];
 
-const AVATAR_COLORS = [
-  ['#6E56CF','#9E8CFC'], ['#0CA678','#37D3A5'], ['#E8590C','#F59F4D'], ['#1971C2','#4DABF7'],
-  ['#9C36B5','#C77DD8'], ['#C2255C','#E64980'], ['#2F9E44','#69DB7C'], ['#1098AD','#3BC9DB'],
-];
+const { avatarHtml, commentHtml, escHtml, makeExpandableByLength } = UI;
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const COLUMN_INITIAL_LIMIT = 8;
 
 const ACTIVITY_LABELS = {
-  created:       { label: 'Created',  cls: 'tc-spill--created'  },
+  created:       { label: 'Created',  cls: 'tc-spill--created' },
   self_assigned: { label: 'Assigned', cls: 'tc-spill--assigned' },
 };
 
@@ -465,9 +463,13 @@ function renderUserCard(member, activities, assignment, stale, memberIdx = 0) {
   card.dataset.memberId = member.accountId;
 
   // Avatar
-  const avatarHtml = member.avatarUrl
-    ? `<img class="avatar" src="${member.avatarUrl}" alt="${escHtml(member.displayName)}" />`
-    : `<div class="avatar" style="background:${avatarBg(memberIdx)}">${escHtml(initials(member.displayName))}</div>`;
+  const memberAvatarHtml = avatarHtml({
+    name: member.displayName,
+    avatarUrl: member.avatarUrl,
+    className: 'avatar',
+    colorIndex: memberIdx,
+    alt: member.displayName,
+  });
 
   // In Progress (grouped)
   const inProgress = Array.isArray(assignment) ? assignment : [];
@@ -505,7 +507,7 @@ function renderUserCard(member, activities, assignment, stale, memberIdx = 0) {
   const subHtml = member.label ? `<div class="who-sub">${escHtml(member.label)}</div>` : '';
   header.innerHTML = `
     <div class="who">
-      ${avatarHtml}
+      ${memberAvatarHtml}
       <div><div class="who-name">${escHtml(member.displayName)}</div>${subHtml}</div>
     </div>
     <div class="inprogress">
@@ -610,7 +612,6 @@ function renderColumn(colDef, member, activities, card) {
   });
   col.querySelector('.col-actions button').addEventListener('click', () => refreshColumn(member, colDef, col, card));
 
-  const INITIAL_LIMIT = 8;
   const rowsEl = col.querySelector('.rows');
   if (activities.length === 0) {
     rowsEl.innerHTML = `<div class="empty">
@@ -622,21 +623,18 @@ function renderColumn(colDef, member, activities, card) {
   } else {
     for (const act of activities) {
       const item = renderFeedItem(act);
-      if (activeTab !== 'all' && act.type !== activeTab) item.style.display = 'none';
       rowsEl.appendChild(item);
     }
-    const allRows = [...rowsEl.querySelectorAll('.row')];
-    if (allRows.length > INITIAL_LIMIT) {
-      allRows.slice(INITIAL_LIMIT).forEach(r => r.classList.add('row-extra'));
+    if (activities.length > COLUMN_INITIAL_LIMIT) {
       const showBtn = document.createElement('button');
       showBtn.className = 'show-more-btn';
-      showBtn.textContent = `Show ${allRows.length - INITIAL_LIMIT} more`;
       showBtn.addEventListener('click', () => {
-        rowsEl.querySelectorAll('.row-extra').forEach(r => r.classList.remove('row-extra'));
-        showBtn.remove();
+        const currentTab = col.querySelector('.tabs button[aria-pressed="true"]')?.dataset.tab || 'all';
+        applyColumnFilterRows(col, currentTab, true);
       });
       rowsEl.appendChild(showBtn);
     }
+    applyColumnFilterRows(col, activeTab);
   }
 
   return col;
@@ -647,19 +645,29 @@ function toggleColumnFilter(userId, colId, type, colEl) {
   colEl.querySelectorAll('.tabs button').forEach(btn => {
     btn.setAttribute('aria-pressed', btn.dataset.tab === type ? 'true' : 'false');
   });
-  colEl.querySelectorAll('.row').forEach(item => {
-    item.style.display = (type === 'all' || item.dataset.type === type) ? '' : 'none';
+  applyColumnFilterRows(colEl, type);
+}
+
+function applyColumnFilterRows(colEl, type, revealAll = false) {
+  const rows = [...colEl.querySelectorAll('.row')];
+  const matchingRows = rows.filter(item => type === 'all' || item.dataset.type === type);
+
+  rows.forEach(item => {
+    const matches = type === 'all' || item.dataset.type === type;
+    item.classList.remove('row-extra');
+    item.style.display = matches ? '' : 'none';
   });
+
+  const hiddenRows = revealAll ? [] : matchingRows.slice(COLUMN_INITIAL_LIMIT);
+  hiddenRows.forEach(item => item.classList.add('row-extra'));
+
   const showBtn = colEl.querySelector('.show-more-btn');
   if (showBtn) {
-    const hidden = [...colEl.querySelectorAll('.row.row-extra')].filter(r =>
-      type === 'all' || r.dataset.type === type
-    ).length;
-    if (hidden === 0) {
+    if (hiddenRows.length === 0) {
       showBtn.style.display = 'none';
     } else {
       showBtn.style.display = '';
-      showBtn.textContent = `Show ${hidden} more`;
+      showBtn.textContent = `Show ${hiddenRows.length} more`;
     }
   }
 }
@@ -685,26 +693,17 @@ function renderFeedItem(act) {
     const authorName   = d?.authorName || d?.by || '';
     const authorAvatar = d?.authorAvatar || null;
     const text         = d?.text || '';
-    const commentHtml  = (d?.body ? adfToHtml(d.body) : null) || escHtml(text);
-    const avHtml       = actorAvatarHtml(authorName, authorAvatar, 'tc-act-av');
+    const bodyHtml     = (d?.body ? adfToHtml(d.body) : null) || escHtml(text);
 
     item.innerHTML = titleLine;
     const block = document.createElement('div');
     block.className = 'tc-comment';
-    block.innerHTML = `
-      <div class="tc-comment-header">
-        ${avHtml}
-        <span class="tc-comment-name">${escHtml(authorName)}</span>
-        <span class="tc-comment-time">${timeRel(act.timestamp)}</span>
-      </div>
-      <div class="tc-comment-text">${commentHtml}</div>`;
-    if (text.length > 200) {
-      block.style.cursor = 'pointer';
-      block.addEventListener('click', e => {
-        if (e.target.closest('a')) return;
-        block.dataset.expanded = block.dataset.expanded === 'true' ? 'false' : 'true';
-      });
-    }
+    block.innerHTML = commentHtml({
+      author: authorName,
+      avatarUrl: authorAvatar,
+      bodyHtml,
+    });
+    makeExpandableByLength(block, text);
     item.appendChild(block);
     return item;
   }
@@ -723,12 +722,18 @@ function renderFeedItem(act) {
     }
   }
 
-  const actLabel = ACTIVITY_LABELS[act.type];
-  const labelHtml = actLabel ? `<span class="tc-spill ${actLabel.cls}">${actLabel.label}</span>` : '';
+  const labelHtml = activityBadgeHtml(act.type);
   const metaLine  = labelHtml || metaDetail ? `\n    <div class="row-meta">${labelHtml}${metaDetail}</div>` : '';
   item.innerHTML = titleLine + metaLine;
 
   return item;
+}
+
+function activityBadgeHtml(type, extraClass = '') {
+  const badge = ACTIVITY_LABELS[type];
+  if (!badge) return '';
+  const cls = ['tc-spill', badge.cls, extraClass].filter(Boolean).join(' ');
+  return `<span class="${cls}">${escHtml(badge.label)}</span>`;
 }
 
 // ── Grouping ───────────────────────────────────────────────────────────────
@@ -792,15 +797,6 @@ function getLastStaleChange(issue) {
 
 // ── Utils ──────────────────────────────────────────────────────────────────
 
-function avatarBg(idx) {
-  const [a, b] = AVATAR_COLORS[idx % AVATAR_COLORS.length];
-  return `linear-gradient(135deg, ${a} 0%, ${b} 100%)`;
-}
-
-function initials(name) {
-  return (name || '').split(/\s+/).filter(Boolean).map(s => s[0]).slice(0, 2).join('').toUpperCase();
-}
-
 function itClass(typeName) {
   const n = (typeName || '').toLowerCase();
   if (n.includes('bug'))    return 'it-bug';
@@ -858,10 +854,6 @@ function daysSince(date) {
 function trunc(str, len) {
   if (!str) return '';
   return str.length > len ? str.substring(0, len) + '…' : str;
-}
-
-function escHtml(str) {
-  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function showMessage(type, html) {
@@ -1134,14 +1126,6 @@ function priorityIconHtml(priority) {
   return `<span class="tc-prio-badge ${cls}">${label}</span>`;
 }
 
-function actorAvatarHtml(name, avatarUrl, cls) {
-  if (avatarUrl) return `<img class="${cls}" src="${avatarUrl}" alt="">`;
-  const initials = (name || '?').split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
-  const idx = (name || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0) % AVATAR_COLORS.length;
-  const [bg] = AVATAR_COLORS[idx];
-  return `<span class="${cls} tc-av--init" style="background:${bg}">${initials}</span>`;
-}
-
 function shortenStatus(s) {
   return (s || '').replace(/waiting for support/i, 'Support').replace(/waiting for customer/i, 'Customer');
 }
@@ -1371,7 +1355,7 @@ function renderTicketRow(ticket) {
     if (ticket.scalrAccount) parts.push(`<span class="tc-account">${escHtml(ticket.scalrAccount)}</span>`);
     if (showAssignee) {
       const name = ticket.assignee || 'Unassigned';
-      const avHtml = actorAvatarHtml(name, ticket.assigneeAvatar, 'tc-assignee-av');
+      const avHtml = avatarHtml({ name, avatarUrl: ticket.assigneeAvatar, className: 'tc-assignee-av', placeholderClass: 'tc-av--init' });
       parts.push(`${avHtml}<span class="tc-assignee">${escHtml(name)}</span>`);
     }
     if (showDue) {
@@ -1406,7 +1390,7 @@ function renderTicketRow(ticket) {
     for (const act of ticket.recentActivities) {
       const actEl = document.createElement('div');
       actEl.className = 'tc-act';
-      const avHtml = actorAvatarHtml(act.actor, act.actorAvatar, 'tc-act-av');
+      const avHtml = avatarHtml({ name: act.actor, avatarUrl: act.actorAvatar, className: 'tc-act-av', placeholderClass: 'tc-av--init' });
       if (act.type === 'transition') {
         actEl.innerHTML = `
           ${avHtml}
@@ -1450,22 +1434,14 @@ function renderTicketRow(ticket) {
   if (ticket.lastComment) {
     const commentEl = document.createElement('div');
     commentEl.className = 'tc-comment';
-    const commentHtml = ticket.lastComment.html || escHtml(ticket.lastComment.text);
-    const cAvHtml = actorAvatarHtml(ticket.lastComment.author, ticket.lastComment.avatarUrl, 'tc-act-av');
-    commentEl.innerHTML = `
-      <div class="tc-comment-header">
-        ${cAvHtml}
-        <span class="tc-comment-name">${escHtml(ticket.lastComment.author)}</span>
-        <span class="tc-comment-time">${timeRel(ticket.lastComment.date)}</span>
-      </div>
-      <div class="tc-comment-text">${commentHtml}</div>`;
-    if (ticket.lastComment.text.length > 200) {
-      commentEl.style.cursor = 'pointer';
-      commentEl.addEventListener('click', e => {
-        if (e.target.closest('a')) return;
-        commentEl.dataset.expanded = commentEl.dataset.expanded === 'true' ? 'false' : 'true';
-      });
-    }
+    const bodyHtml = ticket.lastComment.html || escHtml(ticket.lastComment.text);
+    commentEl.innerHTML = commentHtml({
+      author: ticket.lastComment.author,
+      avatarUrl: ticket.lastComment.avatarUrl,
+      dateLabel: timeRel(ticket.lastComment.date),
+      bodyHtml,
+    });
+    makeExpandableByLength(commentEl, ticket.lastComment.text);
     bodyEl.appendChild(commentEl);
   }
 

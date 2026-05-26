@@ -1,3 +1,5 @@
+const { avatarHtml, debounce, escHtml } = UI;
+
 let teamMembers = [];
 
 async function init() {
@@ -71,7 +73,7 @@ async function searchUsers() {
         item.className = 'search-result-item';
         const avatarSrc = user.avatarUrls?.['24x24'] || '';
         item.innerHTML = `
-          ${avatarSrc ? `<img class="result-avatar" src="${avatarSrc}" />` : ''}
+          ${avatarSrc ? avatarHtml({ name: user.displayName, avatarUrl: avatarSrc, className: 'result-avatar' }) : ''}
           <span>${escHtml(user.displayName)}</span>
           <span class="result-email">${escHtml(user.emailAddress || '')}</span>
         `;
@@ -115,11 +117,15 @@ function renderTeamList() {
   for (const [idx, m] of teamMembers.entries()) {
     const item = document.createElement('div');
     item.className = 'team-member';
-    const avatarHtml = m.avatarUrl
-      ? `<img class="member-avatar" src="${m.avatarUrl}" alt="${escHtml(m.displayName)}" />`
-      : `<div class="member-avatar placeholder">${escHtml(m.displayName[0])}</div>`;
+    const memberAvatarHtml = avatarHtml({
+      name: m.displayName,
+      avatarUrl: m.avatarUrl,
+      className: 'member-avatar',
+      placeholderClass: 'placeholder',
+      alt: m.displayName,
+    });
     item.innerHTML = `
-      ${avatarHtml}
+      ${memberAvatarHtml}
       <div class="member-info">
         <span class="member-name">${escHtml(m.displayName)}</span>
         <span class="member-email">${escHtml(m.email)}</span>
@@ -164,17 +170,6 @@ async function saveSettings() {
 function setResult(el, type, text) {
   el.textContent = text;
   el.className = 'inline-result' + (type ? ` ${type}` : '');
-}
-
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-function debounce(fn, ms) {
-  let t;
-  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
 document.addEventListener('DOMContentLoaded', init);
