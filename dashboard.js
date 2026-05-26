@@ -23,7 +23,7 @@ const COLUMNS = [
   },
 ];
 
-const { avatarHtml, commentHtml, escHtml, makeExpandableByLength } = UI;
+const { avatarHtml, commentHtml, escHtml, makeExpandableIfClamped } = UI;
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const COLUMN_INITIAL_LIMIT = 8;
@@ -540,10 +540,10 @@ function renderUserCard(member, activities, assignment, stale, memberIdx = 0) {
     const staleRow = iss => {
       const url = `${settings.jiraUrl}/browse/${iss.key}`;
       const lastChange = getLastStaleChange(iss);
-      return `<div class="stale-row">
+      return `<div class="stale-row ${issueRowClass(iss.fields.issuetype?.name)}">
         <div>
           <div class="row-title">
-            <a class="key" href="${url}" target="_blank" rel="noopener"><span class="it-icon ${itClass(iss.fields.issuetype?.name)}" aria-hidden="true"></span>${escHtml(iss.key)}</a>
+            <a class="key" href="${url}" target="_blank" rel="noopener">${escHtml(iss.key)}</a>
             <a class="summary" href="${url}" target="_blank" rel="noopener">${escHtml(trunc(iss.fields.summary, 90))}</a>
           </div>
           ${lastChange ? `<div class="meta-line">${escHtml(trunc(lastChange, 140))}</div>` : ''}
@@ -674,11 +674,11 @@ function applyColumnFilterRows(colEl, type, revealAll = false) {
 
 function renderFeedItem(act) {
   const item = document.createElement('div');
-  item.className = 'row';
+  item.className = `row ${issueRowClass(act.issue.type)}`;
   item.dataset.type = act.type;
 
   const url     = act.issue.url;
-  const keyHtml = `<a class="key" href="${url}" target="_blank" rel="noopener"><span class="it-icon ${itClass(act.issue.type)}" aria-hidden="true"></span>${escHtml(act.issue.key)}</a>`;
+  const keyHtml = `<a class="key" href="${url}" target="_blank" rel="noopener">${escHtml(act.issue.key)}</a>`;
 
   const d = act.detail;
   const titleLine = `
@@ -703,7 +703,7 @@ function renderFeedItem(act) {
       avatarUrl: authorAvatar,
       bodyHtml,
     });
-    makeExpandableByLength(block, text);
+    makeExpandableIfClamped(block);
     item.appendChild(block);
     return item;
   }
@@ -797,14 +797,22 @@ function getLastStaleChange(issue) {
 
 // ── Utils ──────────────────────────────────────────────────────────────────
 
-function itClass(typeName) {
+function issueTypeClass(typeName) {
   const n = (typeName || '').toLowerCase();
-  if (n.includes('bug'))    return 'it-bug';
-  if (n.includes('epic'))   return 'it-epic';
-  if (n.includes('story'))  return 'it-story';
-  if (n.includes('sub'))    return 'it-subtask';
-  if (n.includes('improv')) return 'it-improve';
-  return 'it-task';
+  if (n.includes('bug'))    return 'bug';
+  if (n.includes('epic'))   return 'epic';
+  if (n.includes('story'))  return 'story';
+  if (n.includes('sub'))    return 'subtask';
+  if (n.includes('improv')) return 'improve';
+  return 'task';
+}
+
+function itClass(typeName) {
+  return `it-${issueTypeClass(typeName)}`;
+}
+
+function issueRowClass(typeName) {
+  return `issue-${issueTypeClass(typeName)}`;
 }
 
 function pillClass(status) {
@@ -1441,7 +1449,7 @@ function renderTicketRow(ticket) {
       dateLabel: timeRel(ticket.lastComment.date),
       bodyHtml,
     });
-    makeExpandableByLength(commentEl, ticket.lastComment.text);
+    makeExpandableIfClamped(commentEl);
     bodyEl.appendChild(commentEl);
   }
 

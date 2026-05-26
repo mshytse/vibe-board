@@ -53,12 +53,20 @@ const UI = (() => {
       <div class="tc-comment-text">${bodyHtml}</div>`;
   }
 
-  function makeExpandableByLength(el, text, limit = 200) {
-    if ((text || '').length <= limit) return;
-    el.style.cursor = 'pointer';
-    el.addEventListener('click', e => {
+  function makeExpandableIfClamped(el, contentSelector = '.tc-comment-text') {
+    const content = el.querySelector(contentSelector);
+    if (!content) return;
+
+    const toggle = e => {
       if (e.target.closest('a')) return;
       el.dataset.expanded = el.dataset.expanded === 'true' ? 'false' : 'true';
+    };
+
+    requestAnimationFrame(() => {
+      const isClamped = content.scrollHeight > content.clientHeight + 1;
+      if (!isClamped) return;
+      el.style.cursor = 'pointer';
+      el.addEventListener('click', toggle);
     });
   }
 
@@ -72,11 +80,9 @@ const UI = (() => {
 
   return {
     avatarHtml,
-    colorFromIndex,
     commentHtml,
     debounce,
     escHtml,
-    initials,
-    makeExpandableByLength,
+    makeExpandableIfClamped,
   };
 })();
