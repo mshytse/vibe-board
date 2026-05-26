@@ -30,16 +30,21 @@ const AVATAR_COLORS = [
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-const BADGE_CSS = { status_change: 'status', self_assigned: 'assigned' };
-const BADGE_LABELS = {
-  created: 'Created', status_change: 'Status', closed: 'Closed',
-  self_assigned: 'Assigned', comment: 'Comment', mention: 'Mention',
+const ACTIVITY_LABELS = {
+  created:       { label: 'Created',  cls: 'tc-spill--created'  },
+  self_assigned: { label: 'Assigned', cls: 'tc-spill--assigned' },
 };
 
 const api = new JiraAPI();
 let settings = null;
 let currentPeriod = 3;
+let currentView = 'team';
 let lastUpdateTime = null;
+const activeLane = { main: 'needs', eng: 'sec-dep' };
+let supportTickets = [];
+let supportTotal = 0;
+let supportInternalFieldId = null;
+let supportFolded = false;
 const columnFilters = {};
 const dataCache = {};
 
@@ -120,31 +125,43 @@ async function init() {
     });
   });
 
-document.getElementById('refreshBtn').addEventListener('click', () => {
-    const btn = document.getElementById('refreshBtn');
-    btn.classList.add('spin');
-    loadDashboard(true).finally(() => btn.classList.remove('spin'));
+  const initialView = location.pathname === '/support' ? 'support' : 'team';
+  currentView = initialView;
+  applyView(initialView);
+
+  window.addEventListener('popstate', e => {
+    const v = e.state?.view || (location.pathname === '/support' ? 'support' : 'team');
+    currentView = v;
+    applyView(v);
+    if (v === 'support') loadSupportBoard(); else loadDashboard();
   });
 
-  document.getElementById('searchInput').addEventListener('input', e => {
-    const q = e.target.value.trim().toLowerCase();
-    document.querySelectorAll('#dashboard .card').forEach(card => {
-      if (!q) { card.style.display = ''; return; }
-      const name = card.querySelector('.who-name')?.textContent.toLowerCase() || '';
-      if (name.includes(q)) { card.style.display = ''; return; }
-      const hasRow = [...card.querySelectorAll('.row')].some(r => {
-        const key     = r.querySelector('.key')?.textContent.toLowerCase() || '';
-        const summary = r.querySelector('.summary')?.textContent.toLowerCase() || '';
-        return key.includes(q) || summary.includes(q);
-      });
-      card.style.display = hasRow ? '' : 'none';
+  document.querySelectorAll('.view-tabs button').forEach(btn => {
+    btn.addEventListener('click', () => switchView(btn.dataset.view));
+  });
+
+  const foldBtn = document.getElementById('foldBtn');
+  const FOLD_ICONS = {
+    fold:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>`,
+    unfold: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="17" width="18" height="4" rx="1"/></svg>`,
+  };
+  foldBtn.addEventListener('click', () => {
+    supportFolded = !supportFolded;
+    foldBtn.title = supportFolded ? 'Unfold all cards' : 'Fold all cards';
+    foldBtn.setAttribute('aria-label', foldBtn.title);
+    foldBtn.innerHTML = supportFolded ? FOLD_ICONS.unfold : FOLD_ICONS.fold;
+    document.querySelectorAll('#support-board .tc').forEach(tc => {
+      tc.dataset.open = supportFolded ? 'false' : 'true';
     });
   });
 
-  document.addEventListener('keydown', e => {
-    if (e.key === '/' && !/input|textarea/i.test(e.target.tagName)) {
-      e.preventDefault();
-      document.getElementById('searchInput')?.focus();
+  document.getElementById('refreshBtn').addEventListener('click', () => {
+    const btn = document.getElementById('refreshBtn');
+    btn.classList.add('spin');
+    if (currentView === 'support') {
+      loadSupportBoard().finally(() => btn.classList.remove('spin'));
+    } else {
+      loadDashboard(true).finally(() => btn.classList.remove('spin'));
     }
   });
 
@@ -154,7 +171,7 @@ document.getElementById('refreshBtn').addEventListener('click', () => {
     if (lu) lu.textContent = timeRel(lastUpdateTime);
   }, 30000);
 
-  loadDashboard();
+  if (initialView === 'support') loadSupportBoard(); else loadDashboard();
 }
 
 // ── Loading ────────────────────────────────────────────────────────────────
@@ -178,6 +195,7 @@ async function loadDashboard(forceRefresh = false) {
   for (const [idx, member] of settings.teamMembers.entries()) {
     try {
       const data = await fetchUserData(member, currentPeriod);
+      if (currentView !== 'team') return;
       newCache.activities[member.accountId]         = data.activities;
       newCache.currentAssignments[member.accountId] = data.currentAssignment;
       newCache.staleByUser[member.accountId]        = data.stale;
@@ -276,8 +294,10 @@ function buildActivities(issues, teamIds, cutoff, baseUrl) {
               });
             }
           }
-        } else if (item.field === 'assignee' && authorIsTeam && item.to === authorId) {
-          byUser[authorId].push({ type: 'self_assigned', timestamp: ts, issue: info });
+        } else if (item.field === 'assignee' && item.to && teamIds.includes(item.to)) {
+          const assignedBy = history.author?.displayName || null;
+          byUser[item.to].push({ type: 'self_assigned', timestamp: ts, issue: info,
+            detail: { by: assignedBy } });
         }
       }
     }
@@ -290,13 +310,23 @@ function buildActivities(issues, teamIds, cutoff, baseUrl) {
       const text = adfToText(comment.body);
       const authorId = comment.author?.accountId;
       if (authorId && teamIds.includes(authorId)) {
-        byUser[authorId].push({ type: 'comment', timestamp: ts, issue: info, detail: { preview: text.substring(0, 160) } });
+        byUser[authorId].push({ type: 'comment', timestamp: ts, issue: info, detail: {
+          body:         comment.body,
+          text,
+          authorName:   comment.author?.displayName || '',
+          authorAvatar: comment.author?.avatarUrls?.['16x16'] || null,
+        }});
       }
       for (const mentionedId of adfMentions(comment.body)) {
         if (mentionedId !== authorId && teamIds.includes(mentionedId)) {
           byUser[mentionedId].push({
             type: 'mention', timestamp: ts, issue: info,
-            detail: { by: comment.author?.displayName || 'Someone', preview: text.substring(0, 160) },
+            detail: {
+              by:           comment.author?.displayName || 'Someone',
+              body:         comment.body,
+              text,
+              authorAvatar: comment.author?.avatarUrls?.['16x16'] || null,
+            },
           });
         }
       }
@@ -342,7 +372,7 @@ async function fetchUserData(member, days) {
   return { activities: byUser[member.accountId] || [], currentAssignment, stale };
 }
 
-async function refreshColumn(member, colDef, colEl, card) {
+async function refreshColumn(member, _colDef, colEl, card) {
   const rowsEl = colEl.querySelector('.rows');
   const btn    = colEl.querySelector('.col-actions button');
   btn.disabled = true;
@@ -372,8 +402,38 @@ function adfToText(node) {
   if (!node) return '';
   if (node.type === 'text') return node.text || '';
   if (node.type === 'hardBreak') return '\n';
+  if (node.type === 'mention') return node.attrs?.text || '';
   if (node.content) return node.content.map(adfToText).join('');
   return '';
+}
+
+function adfToHtml(node) {
+  if (!node) return '';
+  const inner = () => (node.content || []).map(adfToHtml).join('');
+  switch (node.type) {
+    case 'doc':         return inner();
+    case 'paragraph':   return `<p>${inner()}</p>`;
+    case 'hardBreak':   return '<br>';
+    case 'mention':     return `<span class="tc-mention">${escHtml(node.attrs?.text || '')}</span>`;
+    case 'bulletList':  return `<ul>${inner()}</ul>`;
+    case 'orderedList': return `<ol>${inner()}</ol>`;
+    case 'listItem':    return `<li>${inner()}</li>`;
+    case 'codeBlock':   return `<pre><code>${inner()}</code></pre>`;
+    case 'blockquote':  return `<blockquote>${inner()}</blockquote>`;
+    case 'heading':     return `<strong>${inner()}</strong>`;
+    case 'inlineCard':  return `<a class="tc-mention" href="${escHtml(node.attrs?.url || '')}" target="_blank" rel="noopener">${escHtml(node.attrs?.url || '')}</a>`;
+    case 'text': {
+      let t = escHtml(node.text || '');
+      for (const m of (node.marks || [])) {
+        if (m.type === 'strong')      t = `<strong>${t}</strong>`;
+        else if (m.type === 'em')     t = `<em>${t}</em>`;
+        else if (m.type === 'code')   t = `<code>${t}</code>`;
+        else if (m.type === 'link')   t = `<a href="${escHtml(m.attrs?.href || '')}" target="_blank" rel="noopener">${t}</a>`;
+      }
+      return t;
+    }
+    default: return inner();
+  }
 }
 
 function adfMentions(node) {
@@ -442,10 +502,11 @@ function renderUserCard(member, activities, assignment, stale, memberIdx = 0) {
   // Header
   const header = document.createElement('header');
   header.className = 'card-head';
+  const subHtml = member.label ? `<div class="who-sub">${escHtml(member.label)}</div>` : '';
   header.innerHTML = `
     <div class="who">
       ${avatarHtml}
-      <div><div class="who-name">${escHtml(member.displayName)}</div></div>
+      <div><div class="who-name">${escHtml(member.displayName)}</div>${subHtml}</div>
     </div>
     <div class="inprogress">
       <div class="ip-label">In Progress <span class="count">${inProgress.length}</span></div>
@@ -608,36 +669,64 @@ function renderFeedItem(act) {
   item.className = 'row';
   item.dataset.type = act.type;
 
-  const badgeCls   = BADGE_CSS[act.type] || act.type;
-  const badgeLabel = BADGE_LABELS[act.type] || act.type;
-  const url        = act.issue.url;
-  const keyHtml    = `<a class="key" href="${url}" target="_blank" rel="noopener"><span class="it-icon ${itClass(act.issue.type)}" aria-hidden="true"></span>${escHtml(act.issue.key)}</a>`;
-  const sumHtml    = `<a class="summary" href="${url}" target="_blank" rel="noopener">${escHtml(trunc(act.issue.summary, 100))}</a>`;
+  const url     = act.issue.url;
+  const keyHtml = `<a class="key" href="${url}" target="_blank" rel="noopener"><span class="it-icon ${itClass(act.issue.type)}" aria-hidden="true"></span>${escHtml(act.issue.key)}</a>`;
 
   const d = act.detail;
-  let detailHtml = '';
-  const arrow = `<svg class="arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>`;
+  const titleLine = `
+    <div class="row-top">
+      ${keyHtml}
+      <a class="row-sum" href="${url}" target="_blank" rel="noopener">${escHtml(trunc(act.issue.summary, 100))}</a>
+      <span class="row-time" title="${escHtml(timeAbs(act.timestamp))}">${timeRel(act.timestamp)}</span>
+    </div>`;
+
+  // Comments and mentions → styled block like support board
+  if (act.type === 'comment' || act.type === 'mention') {
+    const authorName   = d?.authorName || d?.by || '';
+    const authorAvatar = d?.authorAvatar || null;
+    const text         = d?.text || '';
+    const commentHtml  = (d?.body ? adfToHtml(d.body) : null) || escHtml(text);
+    const avHtml       = actorAvatarHtml(authorName, authorAvatar, 'tc-act-av');
+
+    item.innerHTML = titleLine;
+    const block = document.createElement('div');
+    block.className = 'tc-comment';
+    block.innerHTML = `
+      <div class="tc-comment-header">
+        ${avHtml}
+        <span class="tc-comment-name">${escHtml(authorName)}</span>
+        <span class="tc-comment-time">${timeRel(act.timestamp)}</span>
+      </div>
+      <div class="tc-comment-text">${commentHtml}</div>`;
+    if (text.length > 200) {
+      block.style.cursor = 'pointer';
+      block.addEventListener('click', e => {
+        if (e.target.closest('a')) return;
+        block.dataset.expanded = block.dataset.expanded === 'true' ? 'false' : 'true';
+      });
+    }
+    item.appendChild(block);
+    return item;
+  }
+
+  // Status / created / assigned → meta line with pills
+  let metaDetail = '';
   if (d) {
     if (act.type === 'status_change') {
-      const byHtml = d.movedBy ? ` <span style="opacity:.65;font-size:.8em">by ${escHtml(d.movedBy)}</span>` : '';
-      detailHtml = `<div class="row-detail"><span class="from">${escHtml(d.from)}</span>${arrow}<span class="to">${escHtml(d.to)}</span>${byHtml}</div>`;
+      const byHtml = d.movedBy ? ` <span class="row-by">by ${escHtml(d.movedBy)}</span>` : '';
+      metaDetail = `<span class="mpill mpill--from">${escHtml(d.from)}</span><span class="arr">→</span><span class="mpill mpill--to">${escHtml(d.to)}</span>${byHtml}`;
     } else if (act.type === 'closed') {
-      const byHtml = d.movedBy ? ` <span style="opacity:.65;font-size:.8em">by ${escHtml(d.movedBy)}</span>` : '';
-      detailHtml = `<div class="row-detail"><span class="from">${escHtml(d.from)}</span>${arrow}<span class="to" style="background:var(--b-closed-bg);color:var(--b-closed-fg)">${escHtml(d.to)}</span>${byHtml}</div>`;
-    } else if (act.type === 'comment') {
-      detailHtml = `<div class="row-detail"><span class="quote">“${escHtml(d.preview || '')}”</span></div>`;
-    } else if (act.type === 'mention') {
-      detailHtml = `<div class="row-detail">Mentioned by <span class="mentioner">${escHtml(d.by)}</span> — <span class="quote">“${escHtml(d.preview || '')}”</span></div>`;
+      const byHtml = d.movedBy ? ` <span class="row-by">by ${escHtml(d.movedBy)}</span>` : '';
+      metaDetail = `<span class="mpill mpill--from">${escHtml(d.from)}</span><span class="arr">→</span><span class="mpill mpill--closed">${escHtml(d.to)}</span>${byHtml}`;
+    } else if (act.type === 'self_assigned' && d.by) {
+      metaDetail = `<span class="row-by">by ${escHtml(d.by)}</span>`;
     }
   }
 
-  item.innerHTML = `
-    <span class="badge badge--${badgeCls}">${badgeLabel}</span>
-    <div class="row-body">
-      <div class="row-title">${keyHtml} ${sumHtml}</div>
-      ${detailHtml}
-    </div>
-    <div class="time">${timeAbs(act.timestamp)}<span class="rel">${timeRel(act.timestamp)}</span></div>`;
+  const actLabel = ACTIVITY_LABELS[act.type];
+  const labelHtml = actLabel ? `<span class="tc-spill ${actLabel.cls}">${actLabel.label}</span>` : '';
+  const metaLine  = labelHtml || metaDetail ? `\n    <div class="row-meta">${labelHtml}${metaDetail}</div>` : '';
+  item.innerHTML = titleLine + metaLine;
 
   return item;
 }
@@ -778,6 +867,634 @@ function escHtml(str) {
 function showMessage(type, html) {
   document.getElementById('dashboard').innerHTML =
     `<div class="empty" style="padding:48px${type === 'error' ? ';color:oklch(0.46 0.18 25)' : ''}">${html}</div>`;
+}
+
+// ── Support board ──────────────────────────────────────────────────────────
+
+function applyView(view) {
+  const titles = { team: 'Team Activity', support: 'Support Board' };
+  document.title = titles[view] || 'Team Activity';
+  document.getElementById('brandTitle').textContent = titles[view] || 'Team Activity';
+  document.querySelectorAll('.view-tabs button').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.view === view ? 'true' : 'false'));
+  document.getElementById('dashboard').hidden         = view === 'support';
+  document.getElementById('support-board').hidden     = view === 'team';
+  document.getElementById('timeRange').hidden = view === 'support';
+  document.getElementById('foldBtn').hidden   = view === 'team';
+}
+
+function switchView(view) {
+  if (view === currentView) return;
+  currentView = view;
+  history.pushState({ view }, '', view === 'support' ? '/support' : '/team');
+  applyView(view);
+  if (view === 'support') loadSupportBoard(); else loadDashboard();
+}
+
+async function loadSupportBoard() {
+  supportTickets = [];
+  supportTotal = 0;
+  supportInternalFieldId = null;
+  const board = document.getElementById('support-board');
+  board.innerHTML = '<div class="sb-empty">Loading…</div>';
+  try {
+    const data = await fetchSupportData(0);
+    if (currentView !== 'support') return;
+    supportInternalFieldId = data.internalFieldId;
+    supportTotal = data.total;
+    const newTickets = data.issues.map(i => normalizeTicket(i, data.internalFieldId));
+    supportTickets = newTickets;
+    if (supportTickets.length === 0 && supportTotal === 0) {
+      board.innerHTML = '<div class="sb-empty">No open support items.</div>';
+      return;
+    }
+    renderSupportBoardUI(board);
+  } catch (err) {
+    board.innerHTML = `<div class="sb-empty" style="color:var(--b-mention-fg)">Failed: ${escHtml(err.message)}</div>`;
+  }
+}
+
+const SUPPORT_PAGE_SIZE = 100;
+
+async function fetchSupportData(startAt) {
+  const fields = await api.getFields();
+  const internalField = Array.isArray(fields)
+    ? fields.find(f => f.name.toLowerCase().startsWith('internal status'))
+    : null;
+  const internalFieldId = internalField?.id || null;
+
+  const issueFields = ['summary', 'status', 'assignee', 'issuetype', 'labels', 'updated', 'created', 'project', 'comment', 'priority', 'duedate', 'issuelinks'];
+  if (internalFieldId) issueFields.push(internalFieldId);
+
+  const jql = '('
+    + '(project = CLOUD AND issuetype not in (Epic) AND statusCategory != Done)'
+    + ' OR (project = SCALRCORE AND labels in (EST, Dependabot) AND statusCategory != Done)'
+    + ' OR (project = SCALRCORE AND issuetype in (Security, "Security Issue") AND statusCategory != Done)'
+    + ') ORDER BY updated DESC';
+
+  const result = await api._get('/search/jql', {
+    jql,
+    fields: issueFields.join(','),
+    expand: 'changelog',
+    startAt,
+    maxResults: SUPPORT_PAGE_SIZE,
+  });
+  const existingKeys = new Set(supportTickets.map(t => t.key));
+  const issues = (result.issues || []).filter(i => !existingKeys.has(i.key));
+  return { issues, total: result.total || 0, internalFieldId };
+}
+
+function getSupportCategory(issue) {
+  const type   = (issue.fields.issuetype?.name || '').toLowerCase();
+  const labels = (issue.fields.labels || []).map(l => l.toLowerCase());
+  if (type === 'security' || type === 'security issue' || labels.includes('security') || labels.includes('dependabot')) return 'security';
+  if (labels.includes('est')) return 'est';
+  return 'cloud';
+}
+
+function normalizeTicket(issue, internalFieldId) {
+  const cat    = getSupportCategory(issue);
+  const status = issue.fields.status?.name || '';
+
+  let internalText = '';
+  if (internalFieldId) {
+    const val = issue.fields[internalFieldId];
+    if (typeof val === 'string') internalText = val;
+    else if (val?.value) internalText = val.value;
+    else if (val?.type === 'doc') internalText = adfToText(val);
+  }
+
+  const comments = issue.fields.comment?.comments || [];
+  const lastCommentRaw = comments.length ? comments[comments.length - 1] : null;
+  const lastComment = lastCommentRaw ? {
+    text:      adfToText(lastCommentRaw.body).trim(),
+    html:      adfToHtml(lastCommentRaw.body).trim(),
+    author:    lastCommentRaw.author?.displayName || '',
+    avatarUrl: lastCommentRaw.author?.avatarUrls?.['16x16'] || null,
+    date:      new Date(lastCommentRaw.created),
+  } : null;
+
+  const histories = issue.changelog?.histories || [];
+
+  const lastTransition = histories
+    .flatMap(h => h.items
+      .filter(i => i.field === 'status')
+      .map(i => ({ from: i.fromString, to: i.toString, author: h.author?.displayName || '', created: h.created }))
+    )
+    .sort((a, b) => new Date(b.created) - new Date(a.created))[0] || null;
+
+  // Always include the most recent changelog entry (any type), then fill up to 3
+  // with status/link events — ensures the "updated Xd ago" timestamp is always explained
+  const recentActivities = [];
+  const sortedH = [...histories].sort((a, b) => new Date(b.created) - new Date(a.created));
+
+  if (sortedH.length > 0) {
+    const h = sortedH[0];
+    const item = h.items[0];
+    if (item) {
+      const av = h.author?.avatarUrls?.['16x16'] || null;
+      if (item.field === 'status') {
+        recentActivities.push({ type: 'transition', actor: h.author?.displayName || '', actorAvatar: av, from: item.fromString, to: item.toString, created: h.created });
+      } else if (item.field === 'Link' || item.fieldId === 'issuelinks') {
+        const m = (item.toString || item.fromString || '').match(/([A-Z]+-\d+)/);
+        recentActivities.push({ type: 'link', actor: h.author?.displayName || '', actorAvatar: av, key: m ? m[1] : (item.toString || ''), created: h.created });
+      } else {
+        recentActivities.push({ type: 'change', actor: h.author?.displayName || '', actorAvatar: av, field: item.field || 'updated', created: h.created });
+      }
+    }
+  }
+
+  for (const h of sortedH.slice(1)) {
+    if (recentActivities.length >= 3) break;
+    const av = h.author?.avatarUrls?.['16x16'] || null;
+    for (const item of h.items) {
+      let act = null;
+      if (item.field === 'status') {
+        act = { type: 'transition', actor: h.author?.displayName || '', actorAvatar: av, from: item.fromString, to: item.toString, created: h.created };
+      } else if (item.field === 'Link' || item.fieldId === 'issuelinks') {
+        const m = (item.toString || item.fromString || '').match(/([A-Z]+-\d+)/);
+        act = { type: 'link', actor: h.author?.displayName || '', actorAvatar: av, key: m ? m[1] : (item.toString || ''), created: h.created };
+      }
+      if (act) { recentActivities.push(act); break; }
+    }
+  }
+
+  // Last activity by a support team member (comment or any changelog entry)
+  const teamIds = new Set((settings.teamMembers || []).map(m => m.accountId));
+  const supportDomain = (settings.supportDomain || 'scalr.com').toLowerCase();
+
+  function isSupportAuthor(author) {
+    if (!author) return false;
+    if (author.emailAddress?.toLowerCase().endsWith('@' + supportDomain)) return true;
+    return teamIds.has(author.accountId);
+  }
+
+  const supportEvents = [];
+  for (const c of comments) {
+    if (isSupportAuthor(c.author)) {
+      supportEvents.push({ label: 'commented', author: c.author.displayName || '', date: new Date(c.created) });
+    }
+  }
+  for (const h of histories) {
+    if (!isSupportAuthor(h.author)) continue;
+    const item = h.items[0];
+    let label = 'made a change';
+    if (item) {
+      if (item.fieldId === 'status' || item.field === 'status') label = `moved → ${item.toString}`;
+      else if (internalFieldId && item.fieldId === internalFieldId) label = 'updated internal status';
+      else if (item.field?.toLowerCase().includes('link')) label = 'linked a ticket';
+      else label = item.field || 'made a change';
+    }
+    supportEvents.push({ label, author: h.author.displayName || '', date: new Date(h.created) });
+  }
+  supportEvents.sort((a, b) => b.date - a.date);
+  const lastSupportActivity = supportEvents[0] || null;
+
+  // TODO: extract Scalr account name (customer) from the appropriate custom field once
+  // the field ID is known. Add the field ID to issueFields in fetchSupportData, then:
+  //   const scalrAccount = issue.fields[SCALR_ACCOUNT_FIELD_ID]?.value || issue.fields[SCALR_ACCOUNT_FIELD_ID] || null;
+  // and include it in the returned object as `scalrAccount`.
+
+  const updatedDate = new Date(issue.fields.updated);
+  const createdDate = new Date(issue.fields.created);
+
+  return {
+    key:           issue.key,
+    summary:       issue.fields.summary || '',
+    status,
+    cat,
+    issuetype:     issue.fields.issuetype?.name || '',
+    project:       issue.fields.project?.key || '',
+    priority:      issue.fields.priority?.name || '',
+    dependabotRepo: (issue.fields.labels || []).some(l => l.toLowerCase() === 'dependabot')
+      ? ((issue.fields.summary || '').match(/\bScalr\/([^\s/,)]+)/i) || [])[1] || null
+      : null,
+    dueDate: issue.fields.duedate ? new Date(issue.fields.duedate) : null,
+    linkedScalrcore: cat === 'cloud'
+      ? (issue.fields.issuelinks || [])
+          .map(lnk => lnk.outwardIssue || lnk.inwardIssue)
+          .filter(li => li && /^SCALRCORE-/i.test(li.key))
+          .map(li => ({
+            key:     li.key,
+            summary: li.fields?.summary || '',
+            status:  li.fields?.status?.name || '',
+            url:     `${settings.jiraUrl}/browse/${li.key}`,
+          }))
+      : [],
+    assignee:      issue.fields.assignee?.displayName || null,
+    assigneeAvatar: issue.fields.assignee?.avatarUrls?.['24x24'] || null,
+    updatedDate,
+    days:          daysSince(updatedDate),
+    createdDate,
+    createdDays:   daysSince(createdDate),
+    internalText,
+    lastComment,
+    lastTransition,
+    lastSupportActivity,
+    scalrAccount:      null, // TODO: populate from custom field (see note above)
+    recentActivities,
+    url:           `${settings.jiraUrl}/browse/${issue.key}`,
+  };
+}
+
+function laneOf(ticket) {
+  if (/waiting for support/i.test(ticket.status))  return 'needs';
+  if (/waiting for customer/i.test(ticket.status)) return 'waiting';
+  if (ticket.days >= 60) return 'stale';
+  if (ticket.days >= 14) return 'aging';
+  return 'inprog';
+}
+
+function urgencyScore(ticket) {
+  let score = ticket.days;
+  if (ticket.cat === 'security')          score += 50;
+  const p = ticket.priority.toLowerCase();
+  if (p.includes('highest'))              score += 40;
+  else if (p.includes('high'))            score += 20;
+  return score;
+}
+
+function timeBadgeClass(days) {
+  if (days === 0) return 'tc-time--today';
+  if (days < 7)   return 'tc-time--fresh';
+  if (days < 14)  return 'tc-time--ok';
+  if (days < 30)  return 'tc-time--aging';
+  return 'tc-time--stale';
+}
+
+
+function priorityIconHtml(priority) {
+  const p = (priority || '').toLowerCase();
+  let label, cls;
+  if (p.includes('highest'))     { label = 'P0'; cls = 'tc-prio--p0'; }
+  else if (p.includes('high'))   { label = 'P1'; cls = 'tc-prio--p1'; }
+  else if (p.includes('lowest')) { label = 'P4'; cls = 'tc-prio--p4'; }
+  else if (p.includes('low'))    { label = 'P3'; cls = 'tc-prio--p3'; }
+  else                           { label = 'P2'; cls = 'tc-prio--p2'; }
+  return `<span class="tc-prio-badge ${cls}">${label}</span>`;
+}
+
+function actorAvatarHtml(name, avatarUrl, cls) {
+  if (avatarUrl) return `<img class="${cls}" src="${avatarUrl}" alt="">`;
+  const initials = (name || '?').split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
+  const idx = (name || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0) % AVATAR_COLORS.length;
+  const [bg] = AVATAR_COLORS[idx];
+  return `<span class="${cls} tc-av--init" style="background:${bg}">${initials}</span>`;
+}
+
+function shortenStatus(s) {
+  return (s || '').replace(/waiting for support/i, 'Support').replace(/waiting for customer/i, 'Customer');
+}
+
+function statusToPillClass(status) {
+  if (/waiting for support/i.test(status))   return 'tc-spill--waiting';
+  if (/waiting for customer/i.test(status))  return 'tc-spill--customer';
+  if (/in progress|in review|cr\b/i.test(status)) return 'tc-spill--progress';
+  return 'tc-spill--default';
+}
+
+const LANES_CONFIG = [
+  { id: 'needs',   title: 'Support',              open: true  },
+  { id: 'aging',   title: 'Aging (14 – 59 days)', open: true  },
+  { id: 'inprog',  title: 'In Progress',          open: true  },
+  { id: 'waiting', title: 'Customer',             open: false },
+  { id: 'stale',   title: 'Stale (60+ days)',     open: false },
+];
+
+function renderSupportBoardUI(board) {
+  const cloudTickets = supportTickets.filter(t => t.cat === 'cloud');
+  const engTickets   = supportTickets.filter(t => t.cat !== 'cloud');
+
+  board.innerHTML = '';
+  const grid = document.createElement('div');
+  grid.className = 'sb-grid';
+
+  const makeCol = (label, { tabs, content }) => {
+    const col = document.createElement('div');
+    col.className = 'sb-col';
+    const header = document.createElement('div');
+    header.className = 'sb-col-header';
+    const titleEl = document.createElement('span');
+    titleEl.className = 'sb-col-title';
+    titleEl.textContent = label;
+    header.appendChild(titleEl);
+    header.appendChild(tabs);
+    col.appendChild(header);
+    col.appendChild(content);
+    return col;
+  };
+
+  grid.appendChild(makeCol('Cloud', renderLaneTabsEl(cloudTickets, 'main', ['needs', 'aging', 'inprog', 'waiting'])));
+  grid.appendChild(makeCol('Engineering', renderEngColumn(engTickets)));
+  board.appendChild(grid);
+
+  if (supportTickets.length < supportTotal) {
+    const remaining = supportTotal - supportTickets.length;
+    const btn = document.createElement('button');
+    btn.className = 'sb-load-more';
+    btn.textContent = `Load ${remaining} more ticket${remaining !== 1 ? 's' : ''}`;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Loading…';
+      try {
+        const data = await fetchSupportData(supportTickets.length);
+        const newTickets = data.issues.map(i => normalizeTicket(i, supportInternalFieldId));
+        supportTickets = [...supportTickets, ...newTickets];
+        supportTotal = data.total;
+        renderSupportBoardUI(board);
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = `Failed — retry`;
+      }
+    });
+    board.appendChild(btn);
+  }
+}
+
+const ENG_SECTIONS = [
+  { id: 'sec-dep',   title: 'Security & Dependabot', filter: t => t.cat === 'security' },
+  { id: 'pickup',    title: 'To Pick Up',             filter: t => t.cat === 'est' && /to do|backlog|ready|new|open/i.test(t.status) },
+  { id: 'inprog',    title: 'In Progress',            filter: t => t.cat !== 'cloud' && /in progress|in review|cr\b|wip|review/i.test(t.status) },
+];
+
+function renderEngColumn(tickets) {
+  if (!ENG_SECTIONS.some(s => s.id === activeLane.eng)) activeLane.eng = ENG_SECTIONS[0].id;
+
+  const tabBar = document.createElement('div');
+  tabBar.className = 'sb-lane-tabs';
+  for (const sec of ENG_SECTIONS) {
+    const count = tickets.filter(sec.filter).length;
+    const isActive = sec.id === activeLane.eng;
+    const btn = document.createElement('button');
+    btn.className = 'sb-lane-tab lane--' + sec.id + (isActive ? ' sb-lane-tab--active' : '');
+    btn.innerHTML = `<span class="lane-dot"></span>${escHtml(sec.title)}<span class="n">${count}</span>`;
+    btn.addEventListener('click', () => {
+      activeLane.eng = sec.id;
+      renderSupportBoardUI(document.getElementById('support-board'));
+    });
+    tabBar.appendChild(btn);
+  }
+  const activeSec = ENG_SECTIONS.find(s => s.id === activeLane.eng);
+  const secTickets = tickets.filter(activeSec.filter).sort((a, b) => a.days - b.days);
+
+  const content = document.createElement('div');
+  content.className = 'sb-lane-content';
+
+  if (secTickets.length === 0) {
+    content.innerHTML = '<div class="sb-lane-empty">No tickets in this section</div>';
+  } else if (activeSec.id === 'sec-dep') {
+    const addSubcat = label => {
+      const el = document.createElement('div');
+      el.className = 'sb-subcat';
+      el.textContent = label;
+      content.appendChild(el);
+    };
+    const securityTickets   = secTickets.filter(t => t.dependabotRepo === null);
+    const dependabotTickets = secTickets.filter(t => t.dependabotRepo !== null);
+    const repoGroups = {};
+    for (const t of dependabotTickets) {
+      const key = t.dependabotRepo || 'Other';
+      (repoGroups[key] = repoGroups[key] || []).push(t);
+    }
+    if (securityTickets.length > 0) {
+      addSubcat('Security');
+      for (const t of securityTickets) content.appendChild(renderTicketRow(t));
+    }
+    for (const [repo, repoTickets] of Object.entries(repoGroups).sort()) {
+      addSubcat(repo);
+      for (const t of repoTickets) content.appendChild(renderTicketRow(t));
+    }
+  } else {
+    const INITIAL = 10;
+    for (const ticket of secTickets.slice(0, INITIAL)) content.appendChild(renderTicketRow(ticket));
+    if (secTickets.length > INITIAL) {
+      const btn = document.createElement('button');
+      btn.className = 'lane-show-more';
+      btn.textContent = `Show ${secTickets.length - INITIAL} more`;
+      btn.addEventListener('click', () => {
+        for (const ticket of secTickets.slice(INITIAL)) btn.before(renderTicketRow(ticket));
+        btn.remove();
+      });
+      content.appendChild(btn);
+    }
+  }
+  return { tabs: tabBar, content };
+}
+
+const LANE_SHORT = { needs: 'Support', aging: 'Aging', inprog: 'In Progress', waiting: 'Customer', stale: 'Stale' };
+
+function renderLaneTabsEl(tickets, colId, laneIds = null) {
+  const lanesCfg = laneIds ? LANES_CONFIG.filter(c => laneIds.includes(c.id)) : LANES_CONFIG;
+  if (!lanesCfg.some(c => c.id === activeLane[colId])) activeLane[colId] = lanesCfg[0].id;
+
+  const counts = {};
+  for (const cfg of lanesCfg) {
+    counts[cfg.id] = tickets.filter(t => laneOf(t) === cfg.id).length;
+  }
+
+  // Tab bar
+  const tabBar = document.createElement('div');
+  tabBar.className = 'sb-lane-tabs';
+  for (const cfg of lanesCfg) {
+    const isActive = cfg.id === activeLane[colId];
+    const btn = document.createElement('button');
+    btn.className = 'sb-lane-tab lane--' + cfg.id + (isActive ? ' sb-lane-tab--active' : '');
+    btn.dataset.lane = cfg.id;
+    btn.innerHTML = `<span class="lane-dot"></span>${escHtml(LANE_SHORT[cfg.id])}<span class="n">${counts[cfg.id]}</span>`;
+    btn.addEventListener('click', () => {
+      activeLane[colId] = cfg.id;
+      renderSupportBoardUI(document.getElementById('support-board'));
+    });
+    tabBar.appendChild(btn);
+  }
+  // Active lane content
+  const laneTickets = tickets
+    .filter(t => laneOf(t) === activeLane[colId])
+    .sort((a, b) => a.days - b.days);
+
+  const content = document.createElement('div');
+  content.className = 'sb-lane-content';
+  if (laneTickets.length === 0) {
+    content.innerHTML = '<div class="sb-lane-empty">No tickets in this lane</div>';
+  } else {
+    const INITIAL = 10;
+    for (const ticket of laneTickets.slice(0, INITIAL)) content.appendChild(renderTicketRow(ticket));
+    if (laneTickets.length > INITIAL) {
+      const btn = document.createElement('button');
+      btn.className = 'lane-show-more';
+      btn.textContent = `Show ${laneTickets.length - INITIAL} more`;
+      btn.addEventListener('click', () => {
+        for (const ticket of laneTickets.slice(INITIAL)) content.insertBefore(renderTicketRow(ticket), btn);
+        btn.remove();
+      });
+      content.appendChild(btn);
+    }
+  }
+  return { tabs: tabBar, content };
+}
+
+function renderTicketRow(ticket) {
+  const statusLabel = shortenStatus(ticket.status);
+
+  const tc = document.createElement('div');
+  tc.className = 'tc';
+  tc.dataset.cat = ticket.cat;
+  tc.dataset.open = supportFolded ? 'false' : 'true';
+
+  // ── Head ────────────────────────────────────────────────────────────────
+  const headEl = document.createElement('div');
+  headEl.className = 'tc-head';
+  const updatedLabel = ticket.days === 0 ? 'updated today' : `updated ${ticket.days}d ago`;
+  const createdLabel = ticket.createdDays === 0 ? 'opened today' : `opened ${ticket.createdDays}d ago`;
+  const timeLbl = ticket.days === 0 ? 'today' : `${ticket.days}d`;
+  headEl.innerHTML = `
+    <div class="tc-head-top">
+      ${priorityIconHtml(ticket.priority)}
+      <a class="tc-key" href="${ticket.url}" target="_blank" rel="noopener">${escHtml(ticket.key)}</a>
+      <span class="tc-head-spacer"></span>
+      <span class="tc-time-badge ${timeBadgeClass(ticket.days)}" title="${updatedLabel}">${timeLbl}</span>
+      <span class="tc-head-sep">·</span>
+      <span class="tc-age-old" title="${createdLabel}">${ticket.createdDays}d old</span>
+      <svg class="tc-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+    </div>
+    <div class="tc-head-title">${escHtml(ticket.summary)}</div>`;
+
+  // ── Meta ────────────────────────────────────────────────────────────────
+  const metaEl = document.createElement('div');
+  metaEl.className = 'tc-meta';
+  const showMetaStatus = statusLabel !== 'Support' && statusLabel !== 'Customer';
+  const showAssignee = ticket.cat !== 'cloud';
+  const showDue = ticket.cat === 'security' && ticket.dueDate;
+  if (showMetaStatus || ticket.scalrAccount || showAssignee || showDue) {
+    const parts = [];
+    if (showMetaStatus) parts.push(`<span class="tc-spill tc-spill--meta ${statusToPillClass(ticket.status)}"><span class="tc-spill-dot"></span>${escHtml(shortenStatus(trunc(ticket.status, 28)))}</span>`);
+    if (ticket.scalrAccount) parts.push(`<span class="tc-account">${escHtml(ticket.scalrAccount)}</span>`);
+    if (showAssignee) {
+      const name = ticket.assignee || 'Unassigned';
+      const avHtml = actorAvatarHtml(name, ticket.assigneeAvatar, 'tc-assignee-av');
+      parts.push(`${avHtml}<span class="tc-assignee">${escHtml(name)}</span>`);
+    }
+    if (showDue) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const isOverdue = ticket.dueDate < today;
+      const daysUntil = Math.ceil((ticket.dueDate - today) / 86400000);
+      const isSoon = !isOverdue && daysUntil <= 7;
+      const yr = ticket.dueDate.getFullYear() !== today.getFullYear() ? ` ${ticket.dueDate.getFullYear()}` : '';
+      const dueLbl = `Due ${MONTHS[ticket.dueDate.getMonth()]} ${ticket.dueDate.getDate()}${yr}`;
+      const dueCls = isOverdue ? 'tc-due--overdue' : (isSoon ? 'tc-due--soon' : '');
+      parts.push(`<span class="tc-due ${dueCls}">${escHtml(dueLbl)}</span>`);
+    }
+    metaEl.innerHTML = parts.join('<span class="tc-meta-dot"> · </span>');
+  }
+
+  // ── Body ────────────────────────────────────────────────────────────────
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'tc-body';
+
+  // Internal status note (if present)
+  if (ticket.internalText) {
+    const noteEl = document.createElement('div');
+    noteEl.className = 'tc-internal';
+    noteEl.textContent = ticket.internalText;
+    bodyEl.appendChild(noteEl);
+  }
+
+  // Activity timeline
+  if (ticket.recentActivities.length > 0) {
+    const actsEl = document.createElement('div');
+    actsEl.className = 'tc-activities';
+    for (const act of ticket.recentActivities) {
+      const actEl = document.createElement('div');
+      actEl.className = 'tc-act';
+      const avHtml = actorAvatarHtml(act.actor, act.actorAvatar, 'tc-act-av');
+      if (act.type === 'transition') {
+        actEl.innerHTML = `
+          ${avHtml}
+          <span class="tc-act-main">
+            <span class="tc-act-actor">${escHtml(act.actor)}</span>
+            <span class="tc-act-verb"> moved </span>
+            <span class="tc-spill tc-spill--sm">${escHtml(shortenStatus(act.from))}</span>
+            <span class="tc-act-arrow">→</span>
+            <span class="tc-spill tc-spill--sm">${escHtml(shortenStatus(act.to))}</span>
+          </span>
+          <span class="tc-act-time">${timeRel(new Date(act.created))}</span>`;
+      } else if (act.type === 'link') {
+        const isKey = /^[A-Z]+-\d+$/.test(act.key);
+        const keyHtml = isKey
+          ? `<a class="tc-spill tc-spill--sm tc-spill--key" href="${settings.jiraUrl}/browse/${act.key}" target="_blank" rel="noopener">${escHtml(act.key)}</a>`
+          : `<span class="tc-spill tc-spill--sm tc-spill--key">${escHtml(act.key)}</span>`;
+        actEl.innerHTML = `
+          ${avHtml}
+          <span class="tc-act-main">
+            <span class="tc-act-actor">${escHtml(act.actor)}</span>
+            <span class="tc-act-verb"> linked </span>
+            ${keyHtml}
+          </span>
+          <span class="tc-act-time">${timeRel(new Date(act.created))}</span>`;
+      } else {
+        actEl.innerHTML = `
+          ${avHtml}
+          <span class="tc-act-main">
+            <span class="tc-act-actor">${escHtml(act.actor)}</span>
+            <span class="tc-act-verb"> updated </span>
+            <span class="tc-act-field">${escHtml(act.field)}</span>
+          </span>
+          <span class="tc-act-time">${timeRel(new Date(act.created))}</span>`;
+      }
+      actsEl.appendChild(actEl);
+    }
+    bodyEl.appendChild(actsEl);
+  }
+
+  // Last comment
+  if (ticket.lastComment) {
+    const commentEl = document.createElement('div');
+    commentEl.className = 'tc-comment';
+    const commentHtml = ticket.lastComment.html || escHtml(ticket.lastComment.text);
+    const cAvHtml = actorAvatarHtml(ticket.lastComment.author, ticket.lastComment.avatarUrl, 'tc-act-av');
+    commentEl.innerHTML = `
+      <div class="tc-comment-header">
+        ${cAvHtml}
+        <span class="tc-comment-name">${escHtml(ticket.lastComment.author)}</span>
+        <span class="tc-comment-time">${timeRel(ticket.lastComment.date)}</span>
+      </div>
+      <div class="tc-comment-text">${commentHtml}</div>`;
+    if (ticket.lastComment.text.length > 200) {
+      commentEl.style.cursor = 'pointer';
+      commentEl.addEventListener('click', e => {
+        if (e.target.closest('a')) return;
+        commentEl.dataset.expanded = commentEl.dataset.expanded === 'true' ? 'false' : 'true';
+      });
+    }
+    bodyEl.appendChild(commentEl);
+  }
+
+  const tcTopEl = document.createElement('div');
+  tcTopEl.className = 'tc-top';
+  tcTopEl.appendChild(headEl);
+  if (showMetaStatus || ticket.scalrAccount || showAssignee || showDue) tcTopEl.appendChild(metaEl);
+  tc.appendChild(tcTopEl);
+  tc.appendChild(bodyEl);
+
+  // Linked SCALRCORE tickets — always-visible footer (outside body so survives fold)
+  if (ticket.linkedScalrcore && ticket.linkedScalrcore.length > 0) {
+    const linksEl = document.createElement('div');
+    linksEl.className = 'tc-links';
+    for (const li of ticket.linkedScalrcore) {
+      const row = document.createElement('div');
+      row.className = 'tc-link-row';
+      row.innerHTML = `<a class="tc-key" href="${escHtml(li.url)}" target="_blank" rel="noopener">${escHtml(li.key)}</a><span class="tc-link-sum">${escHtml(trunc(li.summary, 80))}</span>${li.status ? `<span class="tc-spill tc-spill--sm">${escHtml(li.status)}</span>` : ''}`;
+      linksEl.appendChild(row);
+    }
+    tc.appendChild(linksEl);
+  }
+
+  tcTopEl.addEventListener('click', e => {
+    if (e.target.closest('a')) return;
+    tc.dataset.open = tc.dataset.open === 'true' ? 'false' : 'true';
+  });
+
+  return tc;
 }
 
 document.addEventListener('DOMContentLoaded', init);

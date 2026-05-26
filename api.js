@@ -45,6 +45,12 @@ class JiraAPI {
     return this._get('/user/search', { query, maxResults: 20 });
   }
 
+  async getFields() {
+    if (this._fields) return this._fields;
+    this._fields = await this._get('/field');
+    return this._fields;
+  }
+
   async testAuth() {
     return this._get('/myself');
   }

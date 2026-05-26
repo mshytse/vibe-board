@@ -113,7 +113,12 @@ const server = http.createServer((req, res) => {
   }
 
   // ── Static files ──
-  let filePath = pathname === '/' ? '/dashboard.html' : pathname;
+  if (pathname === '/') {
+    res.writeHead(302, { Location: '/team' });
+    res.end();
+    return;
+  }
+  let filePath = (pathname === '/team' || pathname === '/support') ? '/dashboard.html' : pathname;
   filePath = path.join(__dirname, filePath);
 
   fs.readFile(filePath, (err, data) => {

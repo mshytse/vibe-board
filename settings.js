@@ -93,6 +93,7 @@ function addMember(user) {
     displayName: user.displayName,
     avatarUrl:   user.avatarUrls?.['32x32'] || user.avatarUrls?.['24x24'] || '',
     email:       user.emailAddress || '',
+    label:       '',
   });
   renderTeamList();
   document.getElementById('searchResults').classList.add('hidden');
@@ -111,7 +112,7 @@ function renderTeamList() {
     list.innerHTML = '<div class="team-empty">No team members added yet. Search above to add.</div>';
     return;
   }
-  for (const m of teamMembers) {
+  for (const [idx, m] of teamMembers.entries()) {
     const item = document.createElement('div');
     item.className = 'team-member';
     const avatarHtml = m.avatarUrl
@@ -119,10 +120,16 @@ function renderTeamList() {
       : `<div class="member-avatar placeholder">${escHtml(m.displayName[0])}</div>`;
     item.innerHTML = `
       ${avatarHtml}
-      <span class="member-name">${escHtml(m.displayName)}</span>
-      <span class="member-email">${escHtml(m.email)}</span>
+      <div class="member-info">
+        <span class="member-name">${escHtml(m.displayName)}</span>
+        <span class="member-email">${escHtml(m.email)}</span>
+      </div>
+      <input class="member-label-input" type="text" value="${escHtml(m.label || '')}" placeholder="Role · Location" />
       <button class="remove-btn">Remove</button>
     `;
+    item.querySelector('.member-label-input').addEventListener('input', e => {
+      teamMembers[idx].label = e.target.value;
+    });
     item.querySelector('.remove-btn').addEventListener('click', () => removeMember(m.accountId));
     list.appendChild(item);
   }
